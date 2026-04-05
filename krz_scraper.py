@@ -558,6 +558,101 @@ def scrape() -> list[list]:
         driver.quit()
 
 
+def fetch_details_for_links(rows_data: list[list]) -> None:
+    """Dla każdego wiersza otwiera jego link i dokleja teksty z paneli
+    #ui-panel-2, #ui-panel-3 i #ui-panel-4 do struktury wiersza."""
+    # Zbierz unikalne URL-e do odwiedzenia
+    urls: list[str] = []
+    for row in rows_data:
+        for cell in row:
+            if isinstance(cell, dict) and cell.get("href"):
+                urls.append(cell["href"])
+                break  # pierwszy link w wierszu wystarczy
+        else:
+            urls.append("")
+
+    if not any(urls):
+        print("[info] Brak linków w tabeli — pomijam etap szczegółów.")
+        return
+
+    driver = build_driver(headless=False)
+    try:
+        wait = WebDriverWait(driver, 30)
+        for idx, url in enumerate(urls, start=1):
+            if not url:
+                rows_data[idx - 1].extend(["", "", ""])
+                continue
+            print(f"[info] ({idx}/{len(urls)}) Pobieram szczegóły: {url}")
+            driver.get(url)
+            time.sleep(3)
+
+            # KRZ ładuje szczegóły w iframe — przełącz się
+            switched = False
+            driver.switch_to.default_content()
+            for f in driver.find_elements(By.TAG_NAME, "iframe"):
+                try:
+                    driver.switch_to.frame(f)
+                    if driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "#ui-panel-2, #ui-panel-3, #ui-panel-4, p-panel",
+                    ):
+                        switched = True
+                        break
+                except Exception:
+                    pass
+                driver.switch_to.default_content()
+
+            # Poczekaj aż panele się załadują
+            try:
+                wait.until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR,
+                         "#ui-panel-2, #ui-panel-3, #ui-panel-4")
+                    )
+                )
+            except Exception:
+                print(f"[warn] Panele nie załadowały się dla {url}")
+                rows_data[idx - 1].extend(["", "", ""])
+                continue
+            time.sleep(1)
+
+            texts = []
+            for pid in ("ui-panel-2", "ui-panel-3", "ui-panel-4"):
+                els = driver.find_elements(By.ID, pid)
+                if els:
+                    # upewnij się, że panel jest rozwinięty
+                    togglers = els[0].find_elements(
+                        By.CSS_SELECTOR, "a.ui-panel-titlebar-icon"
+                    )
+                    if togglers:
+                        icon = togglers[0].find_elements(By.TAG_NAME, "span")
+                        if icon and "plus" in (
+                            icon[0].get_attribute("class") or ""
+                        ):
+                            driver.execute_script(
+                                "arguments[0].click();", togglers[0]
+                            )
+                            time.sleep(0.5)
+                    texts.append(els[0].text.strip())
+                else:
+                    texts.append("")
+            rows_data[idx - 1].extend(texts)
+    finally:
+        driver.quit()
+
+
+def scrape_with_details() -> tuple[list, list[list]]:
+    data = scrape()
+    headers, rows_data = data[0], list(data[1:])
+    headers = list(headers) + ["Panel 2", "Panel 3", "Panel 4"]
+    fetch_details_for_links(rows_data)
+    # uzupełnij krótsze wiersze
+    for row in rows_data:
+        while len(row) < len(headers):
+            row.append("")
+    return headers, rows_data
+
+
 def save_to_excel(data: list[list], path: Path) -> None:
     if not data:
         print("Brak danych do zapisania.")
@@ -597,8 +692,8 @@ def save_to_excel(data: list[list], path: Path) -> None:
 
 
 def main() -> None:
-    data = scrape()
-    save_to_excel(data, OUTPUT_FILE)
+    headers, rows_data = scrape_with_details()
+    save_to_excel([headers, *rows_data], OUTPUT_FILE)
 
 
 if __name__ == "__main__":
