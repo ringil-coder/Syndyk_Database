@@ -138,7 +138,7 @@ def collapse_panel_by_header(driver, header_text: str) -> None:
 
 
 def scrape() -> list[list]:
-    driver = build_driver(headless=True)
+    driver = build_driver(headless=False)
     try:
         wait = WebDriverWait(driver, DEFAULT_WAIT)
 
