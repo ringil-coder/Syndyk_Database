@@ -138,25 +138,93 @@ def collapse_panel_by_header(driver, header_text: str) -> None:
 
 
 def scrape() -> list[list]:
-    driver = build_driver(headless=True)
+    driver = build_driver(headless=False)
     try:
         wait = WebDriverWait(driver, DEFAULT_WAIT)
 
-        # 1) Strona główna
+        # 1) Strona główna — Angular boot może trwać dłużej
         driver.get(BASE_URL)
+        print(f"[info] URL: {driver.current_url}")
+        # Poczekaj aż Angular wyrenderuje menu
+        for _ in range(30):
+            if driver.find_elements(By.CSS_SELECTOR, "[id^='item-']"):
+                break
+            time.sleep(1)
+        time.sleep(2)
 
-        # 2) Menu -> "Tablica obwieszczeń"
-        menu_item = wait.until(
-            EC.element_to_be_clickable((By.XPATH, '//*[@id="item-4"]/div'))
+        # 2) Menu -> "Tablica obwieszczeń".
+        # Szukamy po tekście (najbardziej odporne) oraz po id=item-4.
+        menu_item = None
+        candidates = driver.find_elements(
+            By.XPATH,
+            "//*[contains(normalize-space(.), 'Tablica obwieszczeń')"
+            " and (self::a or self::button or contains(@class,'menu'))]",
         )
-        safe_click(driver, menu_item)
+        if candidates:
+            # wybierz najgłębszy kliknięty element
+            menu_item = candidates[-1]
+        else:
+            els = driver.find_elements(By.ID, "item-4")
+            if els:
+                menu_item = els[0]
 
-        # Czekaj na formularz wyszukiwania
-        wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view")
+        if menu_item is None:
+            print("[warn] Nie znaleziono elementu menu 'Tablica obwieszczeń'.")
+            print(f"[debug] Zawartość body (pierwsze 2000 znaków):\n"
+                  f"{driver.find_element(By.TAG_NAME, 'body').text[:2000]}")
+            raise RuntimeError("Brak elementu menu.")
+
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center'});", menu_item
+        )
+        time.sleep(0.5)
+        # Próbujemy kliknąć kolejno: element, jego link <a>, rodzica
+        clicked = False
+        for target in (
+            menu_item,
+            *menu_item.find_elements(By.TAG_NAME, "a"),
+            *menu_item.find_elements(By.XPATH, "./ancestor::a[1]"),
+        ):
+            try:
+                driver.execute_script("arguments[0].click();", target)
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            raise RuntimeError("Nie udało się kliknąć w menu.")
+
+        time.sleep(3)
+        print(f"[info] Po kliknięciu URL: {driver.current_url}")
+
+        # Czekaj na formularz wyszukiwania (fallback: bezpośrednia nawigacja)
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view")
+                )
             )
-        )
+        except Exception:
+            print("[info] Formularz nie pojawił się — próbuję bezpośrednich"
+                  " URLi.")
+            for url in (
+                BASE_URL + "#!/wyszukiwanie-obwieszczen",
+                BASE_URL + "#/wyszukiwanie-obwieszczen",
+                BASE_URL + "wyszukiwanie-obwieszczen",
+                BASE_URL + "#!/tablica-obwieszczen",
+                BASE_URL + "#/tablica-obwieszczen",
+            ):
+                driver.get(url)
+                time.sleep(4)
+                print(f"[info] Próba {url} -> {driver.current_url}")
+                if driver.find_elements(
+                    By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view"
+                ):
+                    break
+            else:
+                print("[debug] Aktualna zawartość (pierwsze 2000 znaków):\n"
+                      f"{driver.find_element(By.TAG_NAME, 'body').text[:2000]}")
+                raise
         time.sleep(2)
 
         # 3) Zakres dat: ostatni miesiąc
