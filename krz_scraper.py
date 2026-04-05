@@ -5,6 +5,10 @@ ze strony https://krz.ms.gov.pl/
 Wymagania:
     pip install selenium openpyxl webdriver-manager
 
+    (webdriver-manager automatycznie pobiera ChromeDriver pasujący do
+    zainstalowanej wersji Chrome, dzięki czemu nie ma znaczenia jaki
+    chromedriver znajduje się w PATH.)
+
 Uwaga:
     Strona https://krz.ms.gov.pl/ jest aplikacją Angular, więc do pobrania
     danych konieczny jest Selenium (sama biblioteka requests nie wystarczy).
@@ -22,6 +26,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -34,7 +39,8 @@ DEFAULT_WAIT = 20
 
 
 def build_driver(headless: bool = True) -> webdriver.Chrome:
-    """Tworzy sterownik Chrome."""
+    """Tworzy sterownik Chrome, automatycznie pobierając pasujący
+    ChromeDriver (ignorując wersję z PATH)."""
     opts = Options()
     if headless:
         opts.add_argument("--headless=new")
@@ -42,7 +48,21 @@ def build_driver(headless: bool = True) -> webdriver.Chrome:
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--lang=pl-PL")
-    return webdriver.Chrome(options=opts)
+
+    # 1) Najpierw próbujemy webdriver-manager (pobiera sterownik
+    #    pasujący do zainstalowanego Chrome i omija ten w PATH).
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+        service = ChromeService(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=opts)
+    except Exception as exc:
+        print(f"[info] webdriver-manager niedostępny ({exc}); "
+              f"próbuję Selenium Manager.")
+
+    # 2) Fallback: Selenium Manager (wbudowany w selenium >= 4.6).
+    #    Pusty Service wymusza użycie Selenium Managera zamiast
+    #    chromedrivera znalezionego w PATH.
+    return webdriver.Chrome(service=ChromeService(), options=opts)
 
 
 def safe_click(driver, element) -> None:
