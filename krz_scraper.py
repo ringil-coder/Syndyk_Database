@@ -144,19 +144,49 @@ def scrape() -> list[list]:
 
         # 1) Strona główna
         driver.get(BASE_URL)
+        time.sleep(3)
 
         # 2) Menu -> "Tablica obwieszczeń"
         menu_item = wait.until(
-            EC.element_to_be_clickable((By.XPATH, '//*[@id="item-4"]/div'))
+            EC.presence_of_element_located((By.XPATH, '//*[@id="item-4"]'))
         )
-        safe_click(driver, menu_item)
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center'});", menu_item
+        )
+        time.sleep(0.5)
+        # klik na kafelek menu (przez rodzica -> link wewnątrz, jeśli istnieje)
+        links = menu_item.find_elements(By.TAG_NAME, "a")
+        try:
+            if links:
+                safe_click(driver, links[0])
+            else:
+                safe_click(driver, menu_item)
+        except Exception:
+            driver.execute_script("arguments[0].click();", menu_item)
 
-        # Czekaj na formularz wyszukiwania
-        wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view")
+        # Czekaj na formularz wyszukiwania (z większym timeoutem i
+        # fallbackiem: bezpośrednia nawigacja)
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view")
+                )
             )
-        )
+        except Exception:
+            # Fallback — spróbuj bezpośrednich adresów
+            for url in (
+                BASE_URL + "#!/wyszukiwanie-obwieszczen",
+                BASE_URL + "#/wyszukiwanie-obwieszczen",
+                BASE_URL + "wyszukiwanie-obwieszczen",
+            ):
+                driver.get(url)
+                time.sleep(3)
+                if driver.find_elements(
+                    By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view"
+                ):
+                    break
+            else:
+                raise
         time.sleep(2)
 
         # 3) Zakres dat: ostatni miesiąc
