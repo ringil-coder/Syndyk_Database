@@ -18,6 +18,7 @@ Uwaga:
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -36,6 +37,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 BASE_URL = "https://krz.ms.gov.pl/"
 OUTPUT_FILE = Path(__file__).parent / "obwieszczenia_masa_upadlosci.xlsx"
 DEFAULT_WAIT = 20
+HEADLESS = os.environ.get("KRZ_HEADLESS", "").lower() in ("1", "true", "yes")
 
 
 def build_driver(headless: bool = True) -> webdriver.Chrome:
@@ -78,8 +80,8 @@ def set_date_range_last_month(driver) -> None:
     wait = WebDriverWait(driver, DEFAULT_WAIT)
 
     today = date.today()
-    month_ago = today - timedelta(days=30)
-    fmt = "%d-%m-%Y"
+    month_ago = today - timedelta(days=14)
+    fmt = "%d.%m.%Y"
 
     # Inputy dat (są wewnątrz panelu "Zakres dat publikacji") — pierwsze dwa
     # inputy typu text w panelu to data od i data do.
@@ -138,7 +140,7 @@ def collapse_panel_by_header(driver, header_text: str) -> None:
 
 
 def scrape() -> list[list]:
-    driver = build_driver(headless=False)
+    driver = build_driver(headless=HEADLESS)
     try:
         wait = WebDriverWait(driver, DEFAULT_WAIT)
 
@@ -197,34 +199,55 @@ def scrape() -> list[list]:
         time.sleep(3)
         print(f"[info] Po kliknięciu URL: {driver.current_url}")
 
-        # Czekaj na formularz wyszukiwania (fallback: bezpośrednia nawigacja)
-        try:
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view")
-                )
-            )
-        except Exception:
-            print("[info] Formularz nie pojawił się — próbuję bezpośrednich"
-                  " URLi.")
-            for url in (
-                BASE_URL + "#!/wyszukiwanie-obwieszczen",
-                BASE_URL + "#/wyszukiwanie-obwieszczen",
-                BASE_URL + "wyszukiwanie-obwieszczen",
-                BASE_URL + "#!/tablica-obwieszczen",
-                BASE_URL + "#/tablica-obwieszczen",
+        # KRZ ładuje Tablicę obwieszczeń w iframe. Spróbuj znaleźć iframe
+        # i przełączyć kontekst WebDrivera do niego.
+        def switch_into_form_iframe() -> bool:
+            driver.switch_to.default_content()
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            print(f"[info] Znaleziono {len(iframes)} iframe(ów).")
+            for idx, f in enumerate(iframes):
+                src = f.get_attribute("src") or ""
+                print(f"[info] iframe[{idx}] src={src[:120]}")
+            for f in iframes:
+                try:
+                    driver.switch_to.frame(f)
+                    # Czy to iframe z formularzem?
+                    if driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "app-wyszukiwanie-obwieszczen-view, "
+                        "p-calendar, "
+                        "div.dodatkoweParametry",
+                    ):
+                        print("[info] Przełączono do iframe z formularzem.")
+                        return True
+                except Exception:
+                    pass
+                driver.switch_to.default_content()
+            return False
+
+        # Poczekaj aż iframe się załaduje i znajdź ten właściwy
+        form_ready = False
+        for attempt in range(15):
+            if switch_into_form_iframe():
+                form_ready = True
+                break
+            # może formularz jest jednak w głównym dokumencie
+            driver.switch_to.default_content()
+            if driver.find_elements(
+                By.CSS_SELECTOR,
+                "app-wyszukiwanie-obwieszczen-view, div.dodatkoweParametry",
             ):
-                driver.get(url)
-                time.sleep(4)
-                print(f"[info] Próba {url} -> {driver.current_url}")
-                if driver.find_elements(
-                    By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view"
-                ):
-                    break
-            else:
-                print("[debug] Aktualna zawartość (pierwsze 2000 znaków):\n"
-                      f"{driver.find_element(By.TAG_NAME, 'body').text[:2000]}")
-                raise
+                form_ready = True
+                print("[info] Formularz w głównym dokumencie.")
+                break
+            time.sleep(1)
+
+        if not form_ready:
+            print("[debug] Body (pierwsze 2000 znaków):\n"
+                  f"{driver.find_element(By.TAG_NAME, 'body').text[:2000]}")
+            raise RuntimeError(
+                "Nie znaleziono formularza wyszukiwania obwieszczeń."
+            )
         time.sleep(2)
 
         # 3) Zakres dat: ostatni miesiąc
@@ -239,10 +262,36 @@ def scrape() -> list[list]:
         safe_click(driver, extra)
         time.sleep(1)
 
-        # 5-7) Zwiń / odkliknij trzy podpanele kategorii (odznacz)
-        #    (tu: "odklikięcie" = zwinięcie / wyczyszczenie — zachowujemy
-        #    domyślne zaznaczenia, zwijając panele aby nie zaznaczać
-        #    dodatkowych kategorii)
+        # 5-7) Zwijanie odbywa się później, po rozwinięciu wszystkich
+        # paneli w kroku 8.
+
+        # 8) W kategoriach obwieszczeń wybierz TYLKO pozycję dotyczącą
+        #    obwieszczeń o masie upadłości.
+        # Najpierw rozwiń wszystkie zwinięte panele w sekcji "dodatkowe
+        # parametry", żeby checkboxy (w tym "masa upadłości") były
+        # widoczne i klikalne. Panel #ui-panel-9-label (kategorie
+        # obwieszczeń) często jest domyślnie zwinięty.
+        togglers = driver.find_elements(
+            By.CSS_SELECTOR,
+            "p-panel a.ui-panel-titlebar-icon",
+        )
+        print(f"[info] Znaleziono {len(togglers)} togglerów paneli.")
+        for t in togglers:
+            try:
+                icon = t.find_element(By.TAG_NAME, "span")
+                cls = icon.get_attribute("class") or ""
+                if "plus" in cls:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", t
+                    )
+                    driver.execute_script("arguments[0].click();", t)
+                    time.sleep(0.3)
+            except Exception:
+                pass
+        time.sleep(0.8)
+
+        # Zwiń z powrotem 3 panele z postępowaniami, żeby ich checkboxy
+        # nie zostały zaznaczone.
         for header in (
             "Postępowania restrukturyzacyjne",
             "Postępowania upadłościowe",
@@ -252,76 +301,206 @@ def scrape() -> list[list]:
                 collapse_panel_by_header(driver, header)
             except Exception:
                 pass
-
-        # 8) W kategoriach obwieszczeń wybierz TYLKO pozycję dotyczącą
-        #    obwieszczeń o masie upadłości (9. checkbox w panelu kategorii
-        #    obwieszczeń).
-        category_panel = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "[id^='ui-panel-'][id$='-content']")
-            )
-        )
-        # Najpierw odznacz wszystko w panelu kategorii obwieszczeń,
-        # potem zaznacz 9. pozycję.
-        checkboxes = driver.find_elements(
-            By.CSS_SELECTOR,
-            "app-wyszukiwanie-obwieszczen-view p-checkbox .ui-chkbox-box",
-        )
-        # odznacz zaznaczone
-        for cb in checkboxes:
-            cls = cb.get_attribute("class") or ""
-            if "ui-state-active" in cls:
-                safe_click(driver, cb)
-                time.sleep(0.05)
-
-        # zaznacz pozycję "Obwieszczenie o ustaleniu składu masy upadłości"
-        target = None
-        for cb in driver.find_elements(
-            By.XPATH,
-            "//label[contains(translate(., 'MASY UPADŁOŚCI', 'masy upadłości'),"
-            " 'masy upadłości')]",
-        ):
-            target = cb
-            break
-        if target is not None:
-            safe_click(driver, target)
-        else:
-            # fallback — 9. checkbox w ostatnim panelu
-            if len(checkboxes) >= 9:
-                safe_click(driver, checkboxes[8])
         time.sleep(0.5)
 
-        # 9) Kliknij przycisk "Szukaj"
-        search_btn = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    "//button[contains(@class,'primary') and "
-                    ".//span[contains(normalize-space(.),'Szukaj')]]",
-                )
+        # Odznacz wszystkie widoczne, zaznaczone checkboxy
+        checkboxes = driver.find_elements(
+            By.CSS_SELECTOR,
+            "p-checkbox .ui-chkbox-box",
+        )
+        for cb in checkboxes:
+            cls = cb.get_attribute("class") or ""
+            if "ui-state-active" in cls and cb.is_displayed():
+                try:
+                    driver.execute_script("arguments[0].click();", cb)
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+
+        # Zaznacz 9. pozycję w panelu kategorii obwieszczeń
+        # (odpowiednik xpath //*[@id="ui-panel-9-content"]/div/div/div[9])
+        target = None
+        try:
+            target = driver.find_element(
+                By.XPATH,
+                '//*[@id="ui-panel-9-content"]/div/div/div[9]',
             )
+            print("[info] Znaleziono ui-panel-9-content/div/div/div[9].")
+        except Exception as exc:
+            print(f"[warn] Nie znaleziono bezpośredniego xpath: {exc}")
+            # Diagnostyka: wypisz wszystkie panele -content
+            for panel in driver.find_elements(
+                By.CSS_SELECTOR, "[id^='ui-panel-'][id$='-content']"
+            ):
+                pid = panel.get_attribute("id")
+                kids = panel.find_elements(By.XPATH, "./div/div/div")
+                print(f"  - {pid}: {len(kids)} dzieci div/div/div")
+            # Fallback — panel z >=9 dzieci zawierający "masy upadłości"
+            for panel in driver.find_elements(
+                By.CSS_SELECTOR, "[id^='ui-panel-'][id$='-content']"
+            ):
+                children = panel.find_elements(By.XPATH, "./div/div/div")
+                if len(children) >= 9 and any(
+                    "masy upadłości" in (c.text or "").lower()
+                    for c in children
+                ):
+                    target = children[8]
+                    break
+
+        if target is not None:
+            text_preview = target.text.strip()[:100]
+            print(f"[info] Element docelowy: '{text_preview}'")
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", target
+            )
+            time.sleep(0.3)
+
+            # Znajdź właściwy checkbox PrimeNG wewnątrz tego divu.
+            click_candidates = (
+                target.find_elements(By.CSS_SELECTOR, "p-checkbox .ui-chkbox-box")
+                + target.find_elements(By.CSS_SELECTOR, ".ui-chkbox-box")
+                + target.find_elements(By.CSS_SELECTOR, "p-checkbox")
+                + target.find_elements(By.TAG_NAME, "label")
+            )
+            print(f"[info] Kandydaci do kliknięcia: {len(click_candidates)}")
+
+            clicked_ok = False
+            for cand in click_candidates:
+                try:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", cand
+                    )
+                    # użyj zdarzenia myszy (bardziej niezawodne dla PrimeNG)
+                    driver.execute_script(
+                        "var e=arguments[0];"
+                        "['mousedown','mouseup','click'].forEach(function(t){"
+                        "e.dispatchEvent(new MouseEvent(t,{bubbles:true,"
+                        "cancelable:true,view:window}));"
+                        "});",
+                        cand,
+                    )
+                    time.sleep(0.3)
+                    # sprawdź czy checkbox stał się aktywny
+                    box = target.find_elements(
+                        By.CSS_SELECTOR, ".ui-chkbox-box"
+                    )
+                    if box and "ui-state-active" in (
+                        box[0].get_attribute("class") or ""
+                    ):
+                        clicked_ok = True
+                        print("[info] Checkbox zaznaczony.")
+                        break
+                except Exception as exc:
+                    print(f"[warn] Klik zawiódł: {exc}")
+                    continue
+
+            if not clicked_ok:
+                # ostatnia próba — klik w sam div
+                driver.execute_script("arguments[0].click();", target)
+                time.sleep(0.3)
+                box = target.find_elements(By.CSS_SELECTOR, ".ui-chkbox-box")
+                if box and "ui-state-active" in (
+                    box[0].get_attribute("class") or ""
+                ):
+                    print("[info] Checkbox zaznaczony (fallback).")
+                else:
+                    print("[warn] Nie udało się zaznaczyć checkboxa.")
+        else:
+            print("[warn] Nie znaleziono panelu z 9. pozycją 'masa upadłości'.")
+        time.sleep(0.5)
+
+        # 9) Kliknij przycisk "Szukaj" / "Wyszukaj"
+        search_btn = None
+        for xp in (
+            "//button[.//span[contains(normalize-space(.),'Szukaj')]]",
+            "//button[.//span[contains(normalize-space(.),'Wyszukaj')]]",
+            "//button[contains(normalize-space(.),'Szukaj')]",
+            "//button[contains(normalize-space(.),'Wyszukaj')]",
+            "//button[contains(@class,'primary')]",
+        ):
+            els = driver.find_elements(By.XPATH, xp)
+            els = [e for e in els if e.is_displayed()]
+            if els:
+                search_btn = els[0]
+                print(f"[info] Przycisk szukaj znaleziony: xpath={xp}")
+                break
+        if search_btn is None:
+            # Dump listę wszystkich widocznych przycisków
+            btns = driver.find_elements(By.TAG_NAME, "button")
+            print("[debug] Widoczne przyciski:")
+            for b in btns:
+                if b.is_displayed():
+                    print(f"  - '{b.text.strip()}' class={b.get_attribute('class')}")
+            raise RuntimeError("Nie znaleziono przycisku wyszukiwania.")
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center'});", search_btn
         )
         safe_click(driver, search_btn)
 
-        # 10) Rozwiń panel z wynikami
-        time.sleep(2)
-        results_panel_title = wait.until(
-            EC.presence_of_element_located(
-                (
-                    By.XPATH,
-                    "//p-panel//span[contains(@class,'ui-panel-title') and "
-                    "contains(normalize-space(.),'Wyniki')]",
+        # 10) Rozwiń panel z wynikami (np. ui-panel-12 / ui-panel-13).
+        # Najpierw poczekaj aż wyniki się załadują, potem rozwiń panel.
+        time.sleep(3)
+
+        def expand_results_panel() -> bool:
+            # Znajdź panel(e) wyników po nagłówku zawierającym "Wyniki"
+            # LUB "obwieszczeń" w tytule, albo dowolny p-panel zawierający
+            # p-table. Rozwiń jeśli zwinięty.
+            panels = driver.find_elements(By.CSS_SELECTOR, "p-panel")
+            for p in panels:
+                # sprawdź czy zawiera p-table (lub będzie zawierać gdy
+                # zostanie rozwinięty — patrz title)
+                has_table = bool(p.find_elements(By.CSS_SELECTOR, "p-table"))
+                title_els = p.find_elements(
+                    By.CSS_SELECTOR, ".ui-panel-title"
                 )
-            )
-        )
-        toggler = results_panel_title.find_element(
-            By.XPATH,
-            "./ancestor::div[contains(@class,'ui-panel-titlebar')]"
-            "//a[contains(@class,'ui-panel-titlebar-icon')]",
-        )
-        icon_cls = toggler.find_element(By.TAG_NAME, "span").get_attribute("class") or ""
-        if "plus" in icon_cls:
-            safe_click(driver, toggler)
+                title = title_els[0].text.strip() if title_els else ""
+                if has_table or "wynik" in title.lower() or \
+                        "obwieszcze" in title.lower():
+                    togglers = p.find_elements(
+                        By.CSS_SELECTOR, "a.ui-panel-titlebar-icon"
+                    )
+                    if not togglers:
+                        continue
+                    tog = togglers[0]
+                    icon = tog.find_element(By.TAG_NAME, "span")
+                    cls = icon.get_attribute("class") or ""
+                    if "plus" in cls:
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});",
+                            tog,
+                        )
+                        driver.execute_script("arguments[0].click();", tog)
+                        time.sleep(1)
+                        print(f"[info] Rozwinięto panel: '{title}'")
+                    else:
+                        print(f"[info] Panel '{title}' już rozwinięty.")
+                    return True
+            return False
+
+        expanded = False
+        for _ in range(20):
+            if expand_results_panel():
+                expanded = True
+                break
+            time.sleep(1)
+
+        if not expanded:
+            print("[warn] Nie znaleziono panelu z wynikami; "
+                  "próbuję ui-panel-12/13 bezpośrednio.")
+            for pid in ("ui-panel-12", "ui-panel-13", "ui-panel-11"):
+                tog = driver.find_elements(
+                    By.CSS_SELECTOR,
+                    f"#{pid} a.ui-panel-titlebar-icon",
+                )
+                if tog:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});",
+                        tog[0],
+                    )
+                    driver.execute_script("arguments[0].click();", tog[0])
+                    time.sleep(1)
+                    print(f"[info] Kliknąłem toggler {pid}.")
+                    break
         time.sleep(2)
 
         # 11) Zbierz tabelę wyników
@@ -381,6 +560,165 @@ def scrape() -> list[list]:
         driver.quit()
 
 
+# Nazwy kolumn wyciąganych ze szczegółów obwieszczenia
+DETAIL_COLUMNS: list[str] = [
+    "Data obwieszczenia",
+    "Numer obwieszczenia",
+    "Sygnatura",
+    "Imię",
+    "Nazwisko",
+    "Miejsce zamieszkania",
+    "Rodzaj podmiotu",
+    "PESEL",
+    "NIP",
+    "Sąd",
+    "Wydział",
+    "Treść obwieszczenia",
+]
+
+
+def _parse_panel_tables(panel_el) -> dict:
+    """Zwraca słownik {nagłówek: wartość} z wszystkich p-table w panelu."""
+    result: dict = {}
+    tables = panel_el.find_elements(By.CSS_SELECTOR, "p-table table")
+    for tbl in tables:
+        headers = [
+            th.text.strip()
+            for th in tbl.find_elements(By.CSS_SELECTOR, "thead th")
+        ]
+        rows = tbl.find_elements(By.CSS_SELECTOR, "tbody tr")
+        if not headers or not rows:
+            continue
+        for tr in rows:
+            cells = tr.find_elements(By.TAG_NAME, "td")
+            for h, td in zip(headers, cells):
+                # usuń powielony nagłówek "ui-column-title" z komórki
+                html = td.get_attribute("innerText") or td.text
+                # Komórka często zawiera <span class="ui-column-title">Nazwa</span>
+                # oraz wartość. Po get_attribute("innerText") otrzymujemy
+                # np. "Imię\nKatarzyna" — bierzemy ostatnią, niepustą linię.
+                lines = [ln.strip() for ln in html.splitlines() if ln.strip()]
+                if lines and lines[0] == h:
+                    lines = lines[1:]
+                value = " ".join(lines).strip()
+                if h and h not in result:
+                    result[h] = value
+    return result
+
+
+def fetch_details_for_links(rows_data: list[list]) -> list[dict]:
+    """Dla każdego wiersza otwiera jego link, parsuje panele 2/3/4/5
+    i zwraca listę słowników {kolumna: wartość}."""
+    urls: list[str] = []
+    for row in rows_data:
+        found = ""
+        for cell in row:
+            if isinstance(cell, dict) and cell.get("href"):
+                found = cell["href"]
+                break
+        urls.append(found)
+
+    details: list[dict] = [dict() for _ in urls]
+    if not any(urls):
+        print("[info] Brak linków w tabeli — pomijam etap szczegółów.")
+        return details
+
+    driver = build_driver(headless=HEADLESS)
+    try:
+        wait = WebDriverWait(driver, 30)
+        for idx, url in enumerate(urls, start=1):
+            if not url:
+                continue
+            print(f"[info] ({idx}/{len(urls)}) Pobieram szczegóły: {url}")
+            driver.switch_to.default_content()
+            driver.get("about:blank")
+            time.sleep(0.3)
+            driver.get(url)
+            time.sleep(4)
+
+            driver.switch_to.default_content()
+            for f in driver.find_elements(By.TAG_NAME, "iframe"):
+                try:
+                    driver.switch_to.frame(f)
+                    if driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "#ui-panel-2, #ui-panel-3, #ui-panel-4, p-panel",
+                    ):
+                        break
+                except Exception:
+                    pass
+                driver.switch_to.default_content()
+
+            try:
+                wait.until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR,
+                         "#ui-panel-2, #ui-panel-3, #ui-panel-4")
+                    )
+                )
+            except Exception:
+                print(f"[warn] Panele nie załadowały się dla {url}")
+                continue
+            time.sleep(1)
+
+            record: dict = {}
+
+            # ui-panel-2: Metryka (Data/Numer/Sygnatura)
+            p2 = driver.find_elements(By.ID, "ui-panel-2")
+            if p2:
+                record.update(_parse_panel_tables(p2[0]))
+
+            # ui-panel-4: Podmiot (Imię/Nazwisko/.../PESEL/NIP)
+            p4 = driver.find_elements(By.ID, "ui-panel-4")
+            if p4:
+                record.update(_parse_panel_tables(p4[0]))
+
+            # ui-panel-5: Sąd/Wydział
+            p5 = driver.find_elements(By.ID, "ui-panel-5")
+            if p5:
+                record.update(_parse_panel_tables(p5[0]))
+
+            # ui-panel-3: Treść obwieszczenia (swobodny tekst)
+            p3 = driver.find_elements(By.ID, "ui-panel-3")
+            if p3:
+                tresc = p3[0].find_elements(
+                    By.CSS_SELECTOR, ".obwieszczenie_tresc"
+                )
+                if tresc:
+                    record["Treść obwieszczenia"] = tresc[0].text.strip()
+                else:
+                    record["Treść obwieszczenia"] = p3[0].text.strip()
+
+            details[idx - 1] = record
+    finally:
+        driver.quit()
+    return details
+
+
+def scrape_with_details() -> tuple[list, list[list]]:
+    data = scrape()
+    table_headers = list(data[0])
+    rows_data = [list(r) for r in data[1:]]
+
+    details = fetch_details_for_links(rows_data)
+
+    # Składamy finalną tabelę:
+    # kolumny oryginalne z listy wyników + szczegóły + Link
+    headers = table_headers + DETAIL_COLUMNS + ["Link"]
+    final_rows: list[list] = []
+    for row, record in zip(rows_data, details):
+        # wyciągnij link z wiersza listy wyników
+        link = ""
+        for cell in row:
+            if isinstance(cell, dict) and cell.get("href"):
+                link = cell["href"]
+                break
+        extra = [record.get(col, "") for col in DETAIL_COLUMNS]
+        final_rows.append(list(row) + extra + [{"text": link, "href": link}
+                                                if link else ""])
+    return headers, final_rows
+
+
 def save_to_excel(data: list[list], path: Path) -> None:
     if not data:
         print("Brak danych do zapisania.")
@@ -420,8 +758,8 @@ def save_to_excel(data: list[list], path: Path) -> None:
 
 
 def main() -> None:
-    data = scrape()
-    save_to_excel(data, OUTPUT_FILE)
+    headers, rows_data = scrape_with_details()
+    save_to_excel([headers, *rows_data], OUTPUT_FILE)
 
 
 if __name__ == "__main__":
