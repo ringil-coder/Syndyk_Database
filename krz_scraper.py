@@ -18,6 +18,7 @@ Uwaga:
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -36,6 +37,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 BASE_URL = "https://krz.ms.gov.pl/"
 OUTPUT_FILE = Path(__file__).parent / "obwieszczenia_masa_upadlosci.xlsx"
 DEFAULT_WAIT = 20
+HEADLESS = os.environ.get("KRZ_HEADLESS", "").lower() in ("1", "true", "yes")
 
 
 def build_driver(headless: bool = True) -> webdriver.Chrome:
@@ -138,7 +140,7 @@ def collapse_panel_by_header(driver, header_text: str) -> None:
 
 
 def scrape() -> list[list]:
-    driver = build_driver(headless=False)
+    driver = build_driver(headless=HEADLESS)
     try:
         wait = WebDriverWait(driver, DEFAULT_WAIT)
 
@@ -621,7 +623,7 @@ def fetch_details_for_links(rows_data: list[list]) -> list[dict]:
         print("[info] Brak linków w tabeli — pomijam etap szczegółów.")
         return details
 
-    driver = build_driver(headless=False)
+    driver = build_driver(headless=HEADLESS)
     try:
         wait = WebDriverWait(driver, 30)
         for idx, url in enumerate(urls, start=1):
