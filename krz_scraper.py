@@ -323,15 +323,21 @@ def scrape() -> list[list]:
                 By.XPATH,
                 '//*[@id="ui-panel-9-content"]/div/div/div[9]',
             )
-        except Exception:
-            # fallback — panel, którego id kończy się na "-content"
-            # i zawiera co najmniej 9 dzieci div na poziomie div/div
+            print("[info] Znaleziono ui-panel-9-content/div/div/div[9].")
+        except Exception as exc:
+            print(f"[warn] Nie znaleziono bezpośredniego xpath: {exc}")
+            # Diagnostyka: wypisz wszystkie panele -content
             for panel in driver.find_elements(
                 By.CSS_SELECTOR, "[id^='ui-panel-'][id$='-content']"
             ):
-                children = panel.find_elements(
-                    By.XPATH, "./div/div/div"
-                )
+                pid = panel.get_attribute("id")
+                kids = panel.find_elements(By.XPATH, "./div/div/div")
+                print(f"  - {pid}: {len(kids)} dzieci div/div/div")
+            # Fallback — panel z >=9 dzieci zawierający "masy upadłości"
+            for panel in driver.find_elements(
+                By.CSS_SELECTOR, "[id^='ui-panel-'][id$='-content']"
+            ):
+                children = panel.find_elements(By.XPATH, "./div/div/div")
                 if len(children) >= 9 and any(
                     "masy upadłości" in (c.text or "").lower()
                     for c in children
@@ -340,19 +346,63 @@ def scrape() -> list[list]:
                     break
 
         if target is not None:
-            print(f"[info] Zaznaczam 9. element panelu: "
-                  f"'{target.text.strip()[:80]}'")
+            text_preview = target.text.strip()[:100]
+            print(f"[info] Element docelowy: '{text_preview}'")
             driver.execute_script(
                 "arguments[0].scrollIntoView({block:'center'});", target
             )
-            # kliknij wewnętrzny checkbox/label jeśli jest
-            inner = target.find_elements(
-                By.CSS_SELECTOR, ".ui-chkbox-box, label, p-checkbox"
+            time.sleep(0.3)
+
+            # Znajdź właściwy checkbox PrimeNG wewnątrz tego divu.
+            click_candidates = (
+                target.find_elements(By.CSS_SELECTOR, "p-checkbox .ui-chkbox-box")
+                + target.find_elements(By.CSS_SELECTOR, ".ui-chkbox-box")
+                + target.find_elements(By.CSS_SELECTOR, "p-checkbox")
+                + target.find_elements(By.TAG_NAME, "label")
             )
-            if inner:
-                driver.execute_script("arguments[0].click();", inner[0])
-            else:
+            print(f"[info] Kandydaci do kliknięcia: {len(click_candidates)}")
+
+            clicked_ok = False
+            for cand in click_candidates:
+                try:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", cand
+                    )
+                    # użyj zdarzenia myszy (bardziej niezawodne dla PrimeNG)
+                    driver.execute_script(
+                        "var e=arguments[0];"
+                        "['mousedown','mouseup','click'].forEach(function(t){"
+                        "e.dispatchEvent(new MouseEvent(t,{bubbles:true,"
+                        "cancelable:true,view:window}));"
+                        "});",
+                        cand,
+                    )
+                    time.sleep(0.3)
+                    # sprawdź czy checkbox stał się aktywny
+                    box = target.find_elements(
+                        By.CSS_SELECTOR, ".ui-chkbox-box"
+                    )
+                    if box and "ui-state-active" in (
+                        box[0].get_attribute("class") or ""
+                    ):
+                        clicked_ok = True
+                        print("[info] Checkbox zaznaczony.")
+                        break
+                except Exception as exc:
+                    print(f"[warn] Klik zawiódł: {exc}")
+                    continue
+
+            if not clicked_ok:
+                # ostatnia próba — klik w sam div
                 driver.execute_script("arguments[0].click();", target)
+                time.sleep(0.3)
+                box = target.find_elements(By.CSS_SELECTOR, ".ui-chkbox-box")
+                if box and "ui-state-active" in (
+                    box[0].get_attribute("class") or ""
+                ):
+                    print("[info] Checkbox zaznaczony (fallback).")
+                else:
+                    print("[warn] Nie udało się zaznaczyć checkboxa.")
         else:
             print("[warn] Nie znaleziono panelu z 9. pozycją 'masa upadłości'.")
         time.sleep(0.5)
