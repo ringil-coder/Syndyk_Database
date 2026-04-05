@@ -315,29 +315,46 @@ def scrape() -> list[list]:
                 except Exception:
                     pass
 
-        # Zaznacz pozycję zawierającą "masy upadłości" w etykiecie
+        # Zaznacz 9. pozycję w panelu kategorii obwieszczeń
+        # (odpowiednik xpath //*[@id="ui-panel-9-content"]/div/div/div[9])
         target = None
-        for lbl in driver.find_elements(
-            By.XPATH,
-            "//label[contains(translate(., "
-            "'ABCDEFGHIJKLMNOPQRSTUVWXYZĄĆĘŁŃÓŚŹŻ', "
-            "'abcdefghijklmnopqrstuvwxyząćęłńóśźż'), 'masy upadłości')]",
-        ):
-            if lbl.is_displayed():
-                target = lbl
-                break
+        try:
+            target = driver.find_element(
+                By.XPATH,
+                '//*[@id="ui-panel-9-content"]/div/div/div[9]',
+            )
+        except Exception:
+            # fallback — panel, którego id kończy się na "-content"
+            # i zawiera co najmniej 9 dzieci div na poziomie div/div
+            for panel in driver.find_elements(
+                By.CSS_SELECTOR, "[id^='ui-panel-'][id$='-content']"
+            ):
+                children = panel.find_elements(
+                    By.XPATH, "./div/div/div"
+                )
+                if len(children) >= 9 and any(
+                    "masy upadłości" in (c.text or "").lower()
+                    for c in children
+                ):
+                    target = children[8]
+                    break
+
         if target is not None:
-            print(f"[info] Zaznaczam: '{target.text.strip()}'")
+            print(f"[info] Zaznaczam 9. element panelu: "
+                  f"'{target.text.strip()[:80]}'")
             driver.execute_script(
                 "arguments[0].scrollIntoView({block:'center'});", target
             )
-            driver.execute_script("arguments[0].click();", target)
+            # kliknij wewnętrzny checkbox/label jeśli jest
+            inner = target.find_elements(
+                By.CSS_SELECTOR, ".ui-chkbox-box, label, p-checkbox"
+            )
+            if inner:
+                driver.execute_script("arguments[0].click();", inner[0])
+            else:
+                driver.execute_script("arguments[0].click();", target)
         else:
-            print("[warn] Nie znaleziono etykiety 'masy upadłości'.")
-            # fallback — 9. widoczny checkbox
-            visible = [c for c in checkboxes if c.is_displayed()]
-            if len(visible) >= 9:
-                driver.execute_script("arguments[0].click();", visible[8])
+            print("[warn] Nie znaleziono panelu z 9. pozycją 'masa upadłości'.")
         time.sleep(0.5)
 
         # 9) Kliknij przycisk "Szukaj" / "Wyszukaj"
