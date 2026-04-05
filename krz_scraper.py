@@ -558,41 +558,82 @@ def scrape() -> list[list]:
         driver.quit()
 
 
-def fetch_details_for_links(rows_data: list[list]) -> None:
-    """Dla każdego wiersza otwiera jego link i dokleja teksty z paneli
-    #ui-panel-2, #ui-panel-3 i #ui-panel-4 do struktury wiersza."""
-    # Zbierz unikalne URL-e do odwiedzenia
+# Nazwy kolumn wyciąganych ze szczegółów obwieszczenia
+DETAIL_COLUMNS: list[str] = [
+    "Data obwieszczenia",
+    "Numer obwieszczenia",
+    "Sygnatura",
+    "Imię",
+    "Nazwisko",
+    "Miejsce zamieszkania",
+    "Rodzaj podmiotu",
+    "PESEL",
+    "NIP",
+    "Sąd",
+    "Wydział",
+    "Treść obwieszczenia",
+]
+
+
+def _parse_panel_tables(panel_el) -> dict:
+    """Zwraca słownik {nagłówek: wartość} z wszystkich p-table w panelu."""
+    result: dict = {}
+    tables = panel_el.find_elements(By.CSS_SELECTOR, "p-table table")
+    for tbl in tables:
+        headers = [
+            th.text.strip()
+            for th in tbl.find_elements(By.CSS_SELECTOR, "thead th")
+        ]
+        rows = tbl.find_elements(By.CSS_SELECTOR, "tbody tr")
+        if not headers or not rows:
+            continue
+        for tr in rows:
+            cells = tr.find_elements(By.TAG_NAME, "td")
+            for h, td in zip(headers, cells):
+                # usuń powielony nagłówek "ui-column-title" z komórki
+                html = td.get_attribute("innerText") or td.text
+                # Komórka często zawiera <span class="ui-column-title">Nazwa</span>
+                # oraz wartość. Po get_attribute("innerText") otrzymujemy
+                # np. "Imię\nKatarzyna" — bierzemy ostatnią, niepustą linię.
+                lines = [ln.strip() for ln in html.splitlines() if ln.strip()]
+                if lines and lines[0] == h:
+                    lines = lines[1:]
+                value = " ".join(lines).strip()
+                if h and h not in result:
+                    result[h] = value
+    return result
+
+
+def fetch_details_for_links(rows_data: list[list]) -> list[dict]:
+    """Dla każdego wiersza otwiera jego link, parsuje panele 2/3/4/5
+    i zwraca listę słowników {kolumna: wartość}."""
     urls: list[str] = []
     for row in rows_data:
+        found = ""
         for cell in row:
             if isinstance(cell, dict) and cell.get("href"):
-                urls.append(cell["href"])
-                break  # pierwszy link w wierszu wystarczy
-        else:
-            urls.append("")
+                found = cell["href"]
+                break
+        urls.append(found)
 
+    details: list[dict] = [dict() for _ in urls]
     if not any(urls):
         print("[info] Brak linków w tabeli — pomijam etap szczegółów.")
-        return
+        return details
 
     driver = build_driver(headless=False)
     try:
         wait = WebDriverWait(driver, 30)
         for idx, url in enumerate(urls, start=1):
             if not url:
-                rows_data[idx - 1].extend(["", "", ""])
                 continue
             print(f"[info] ({idx}/{len(urls)}) Pobieram szczegóły: {url}")
-            # Wymuś pełne przeładowanie — bez tego Angular/SPA nie
-            # przerendruje widoku, gdy trasa hash-a jest identyczna.
             driver.switch_to.default_content()
             driver.get("about:blank")
             time.sleep(0.3)
             driver.get(url)
             time.sleep(4)
 
-            # KRZ ładuje szczegóły w iframe — przełącz się
-            switched = False
             driver.switch_to.default_content()
             for f in driver.find_elements(By.TAG_NAME, "iframe"):
                 try:
@@ -601,13 +642,11 @@ def fetch_details_for_links(rows_data: list[list]) -> None:
                         By.CSS_SELECTOR,
                         "#ui-panel-2, #ui-panel-3, #ui-panel-4, p-panel",
                     ):
-                        switched = True
                         break
                 except Exception:
                     pass
                 driver.switch_to.default_content()
 
-            # Poczekaj aż panele się załadują
             try:
                 wait.until(
                     EC.presence_of_element_located(
@@ -617,45 +656,65 @@ def fetch_details_for_links(rows_data: list[list]) -> None:
                 )
             except Exception:
                 print(f"[warn] Panele nie załadowały się dla {url}")
-                rows_data[idx - 1].extend(["", "", ""])
                 continue
             time.sleep(1)
 
-            texts = []
-            for pid in ("ui-panel-2", "ui-panel-3", "ui-panel-4"):
-                els = driver.find_elements(By.ID, pid)
-                if els:
-                    # upewnij się, że panel jest rozwinięty
-                    togglers = els[0].find_elements(
-                        By.CSS_SELECTOR, "a.ui-panel-titlebar-icon"
-                    )
-                    if togglers:
-                        icon = togglers[0].find_elements(By.TAG_NAME, "span")
-                        if icon and "plus" in (
-                            icon[0].get_attribute("class") or ""
-                        ):
-                            driver.execute_script(
-                                "arguments[0].click();", togglers[0]
-                            )
-                            time.sleep(0.5)
-                    texts.append(els[0].text.strip())
+            record: dict = {}
+
+            # ui-panel-2: Metryka (Data/Numer/Sygnatura)
+            p2 = driver.find_elements(By.ID, "ui-panel-2")
+            if p2:
+                record.update(_parse_panel_tables(p2[0]))
+
+            # ui-panel-4: Podmiot (Imię/Nazwisko/.../PESEL/NIP)
+            p4 = driver.find_elements(By.ID, "ui-panel-4")
+            if p4:
+                record.update(_parse_panel_tables(p4[0]))
+
+            # ui-panel-5: Sąd/Wydział
+            p5 = driver.find_elements(By.ID, "ui-panel-5")
+            if p5:
+                record.update(_parse_panel_tables(p5[0]))
+
+            # ui-panel-3: Treść obwieszczenia (swobodny tekst)
+            p3 = driver.find_elements(By.ID, "ui-panel-3")
+            if p3:
+                tresc = p3[0].find_elements(
+                    By.CSS_SELECTOR, ".obwieszczenie_tresc"
+                )
+                if tresc:
+                    record["Treść obwieszczenia"] = tresc[0].text.strip()
                 else:
-                    texts.append("")
-            rows_data[idx - 1].extend(texts)
+                    record["Treść obwieszczenia"] = p3[0].text.strip()
+
+            details[idx - 1] = record
     finally:
         driver.quit()
+    return details
 
 
 def scrape_with_details() -> tuple[list, list[list]]:
     data = scrape()
-    headers, rows_data = data[0], list(data[1:])
-    headers = list(headers) + ["Panel 2", "Panel 3", "Panel 4"]
-    fetch_details_for_links(rows_data)
-    # uzupełnij krótsze wiersze
-    for row in rows_data:
-        while len(row) < len(headers):
-            row.append("")
-    return headers, rows_data
+    table_headers = list(data[0])
+    rows_data = [list(r) for r in data[1:]]
+
+    details = fetch_details_for_links(rows_data)
+
+    # Składamy finalną tabelę:
+    # kolumny oryginalne z listy wyników + szczegóły + Link
+    headers = table_headers + DETAIL_COLUMNS + ["Link"]
+    final_rows: list[list] = []
+    for row, record in zip(rows_data, details):
+        # wyciągnij link z wiersza listy wyników
+        link = ""
+        for cell in row:
+            if isinstance(cell, dict) and cell.get("href"):
+                link = cell["href"]
+                break
+        extra = [record.get(col, "") for col in DETAIL_COLUMNS]
+        final_rows.append(list(row) + extra + [{"text": link, "href": link}
+                                                if link else ""])
+    return headers, final_rows
 
 
 def save_to_excel(data: list[list], path: Path) -> None:
