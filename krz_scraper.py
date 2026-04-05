@@ -197,34 +197,55 @@ def scrape() -> list[list]:
         time.sleep(3)
         print(f"[info] Po kliknięciu URL: {driver.current_url}")
 
-        # Czekaj na formularz wyszukiwania (fallback: bezpośrednia nawigacja)
-        try:
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view")
-                )
-            )
-        except Exception:
-            print("[info] Formularz nie pojawił się — próbuję bezpośrednich"
-                  " URLi.")
-            for url in (
-                BASE_URL + "#!/wyszukiwanie-obwieszczen",
-                BASE_URL + "#/wyszukiwanie-obwieszczen",
-                BASE_URL + "wyszukiwanie-obwieszczen",
-                BASE_URL + "#!/tablica-obwieszczen",
-                BASE_URL + "#/tablica-obwieszczen",
+        # KRZ ładuje Tablicę obwieszczeń w iframe. Spróbuj znaleźć iframe
+        # i przełączyć kontekst WebDrivera do niego.
+        def switch_into_form_iframe() -> bool:
+            driver.switch_to.default_content()
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            print(f"[info] Znaleziono {len(iframes)} iframe(ów).")
+            for idx, f in enumerate(iframes):
+                src = f.get_attribute("src") or ""
+                print(f"[info] iframe[{idx}] src={src[:120]}")
+            for f in iframes:
+                try:
+                    driver.switch_to.frame(f)
+                    # Czy to iframe z formularzem?
+                    if driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "app-wyszukiwanie-obwieszczen-view, "
+                        "p-calendar, "
+                        "div.dodatkoweParametry",
+                    ):
+                        print("[info] Przełączono do iframe z formularzem.")
+                        return True
+                except Exception:
+                    pass
+                driver.switch_to.default_content()
+            return False
+
+        # Poczekaj aż iframe się załaduje i znajdź ten właściwy
+        form_ready = False
+        for attempt in range(15):
+            if switch_into_form_iframe():
+                form_ready = True
+                break
+            # może formularz jest jednak w głównym dokumencie
+            driver.switch_to.default_content()
+            if driver.find_elements(
+                By.CSS_SELECTOR,
+                "app-wyszukiwanie-obwieszczen-view, div.dodatkoweParametry",
             ):
-                driver.get(url)
-                time.sleep(4)
-                print(f"[info] Próba {url} -> {driver.current_url}")
-                if driver.find_elements(
-                    By.CSS_SELECTOR, "app-wyszukiwanie-obwieszczen-view"
-                ):
-                    break
-            else:
-                print("[debug] Aktualna zawartość (pierwsze 2000 znaków):\n"
-                      f"{driver.find_element(By.TAG_NAME, 'body').text[:2000]}")
-                raise
+                form_ready = True
+                print("[info] Formularz w głównym dokumencie.")
+                break
+            time.sleep(1)
+
+        if not form_ready:
+            print("[debug] Body (pierwsze 2000 znaków):\n"
+                  f"{driver.find_element(By.TAG_NAME, 'body').text[:2000]}")
+            raise RuntimeError(
+                "Nie znaleziono formularza wyszukiwania obwieszczeń."
+            )
         time.sleep(2)
 
         # 3) Zakres dat: ostatni miesiąc
