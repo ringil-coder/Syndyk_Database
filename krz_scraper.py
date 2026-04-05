@@ -435,25 +435,70 @@ def scrape() -> list[list]:
         )
         safe_click(driver, search_btn)
 
-        # 10) Rozwiń panel z wynikami
-        time.sleep(2)
-        results_panel_title = wait.until(
-            EC.presence_of_element_located(
-                (
-                    By.XPATH,
-                    "//p-panel//span[contains(@class,'ui-panel-title') and "
-                    "contains(normalize-space(.),'Wyniki')]",
+        # 10) Rozwiń panel z wynikami (np. ui-panel-12 / ui-panel-13).
+        # Najpierw poczekaj aż wyniki się załadują, potem rozwiń panel.
+        time.sleep(3)
+
+        def expand_results_panel() -> bool:
+            # Znajdź panel(e) wyników po nagłówku zawierającym "Wyniki"
+            # LUB "obwieszczeń" w tytule, albo dowolny p-panel zawierający
+            # p-table. Rozwiń jeśli zwinięty.
+            panels = driver.find_elements(By.CSS_SELECTOR, "p-panel")
+            for p in panels:
+                # sprawdź czy zawiera p-table (lub będzie zawierać gdy
+                # zostanie rozwinięty — patrz title)
+                has_table = bool(p.find_elements(By.CSS_SELECTOR, "p-table"))
+                title_els = p.find_elements(
+                    By.CSS_SELECTOR, ".ui-panel-title"
                 )
-            )
-        )
-        toggler = results_panel_title.find_element(
-            By.XPATH,
-            "./ancestor::div[contains(@class,'ui-panel-titlebar')]"
-            "//a[contains(@class,'ui-panel-titlebar-icon')]",
-        )
-        icon_cls = toggler.find_element(By.TAG_NAME, "span").get_attribute("class") or ""
-        if "plus" in icon_cls:
-            safe_click(driver, toggler)
+                title = title_els[0].text.strip() if title_els else ""
+                if has_table or "wynik" in title.lower() or \
+                        "obwieszcze" in title.lower():
+                    togglers = p.find_elements(
+                        By.CSS_SELECTOR, "a.ui-panel-titlebar-icon"
+                    )
+                    if not togglers:
+                        continue
+                    tog = togglers[0]
+                    icon = tog.find_element(By.TAG_NAME, "span")
+                    cls = icon.get_attribute("class") or ""
+                    if "plus" in cls:
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});",
+                            tog,
+                        )
+                        driver.execute_script("arguments[0].click();", tog)
+                        time.sleep(1)
+                        print(f"[info] Rozwinięto panel: '{title}'")
+                    else:
+                        print(f"[info] Panel '{title}' już rozwinięty.")
+                    return True
+            return False
+
+        expanded = False
+        for _ in range(20):
+            if expand_results_panel():
+                expanded = True
+                break
+            time.sleep(1)
+
+        if not expanded:
+            print("[warn] Nie znaleziono panelu z wynikami; "
+                  "próbuję ui-panel-12/13 bezpośrednio.")
+            for pid in ("ui-panel-12", "ui-panel-13", "ui-panel-11"):
+                tog = driver.find_elements(
+                    By.CSS_SELECTOR,
+                    f"#{pid} a.ui-panel-titlebar-icon",
+                )
+                if tog:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});",
+                        tog[0],
+                    )
+                    driver.execute_script("arguments[0].click();", tog[0])
+                    time.sleep(1)
+                    print(f"[info] Kliknąłem toggler {pid}.")
+                    break
         time.sleep(2)
 
         # 11) Zbierz tabelę wyników
