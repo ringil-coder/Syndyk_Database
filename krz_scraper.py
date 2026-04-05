@@ -79,7 +79,7 @@ def set_date_range_last_month(driver) -> None:
 
     today = date.today()
     month_ago = today - timedelta(days=30)
-    fmt = "%d-%m-%Y"
+    fmt = "%d.%m.%Y"
 
     # Inputy dat (są wewnątrz panelu "Zakres dat publikacji") — pierwsze dwa
     # inputy typu text w panelu to data od i data do.
