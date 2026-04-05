@@ -312,15 +312,31 @@ def scrape() -> list[list]:
                 safe_click(driver, checkboxes[8])
         time.sleep(0.5)
 
-        # 9) Kliknij przycisk "Szukaj"
-        search_btn = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    "//button[contains(@class,'primary') and "
-                    ".//span[contains(normalize-space(.),'Szukaj')]]",
-                )
-            )
+        # 9) Kliknij przycisk "Szukaj" / "Wyszukaj"
+        search_btn = None
+        for xp in (
+            "//button[.//span[contains(normalize-space(.),'Szukaj')]]",
+            "//button[.//span[contains(normalize-space(.),'Wyszukaj')]]",
+            "//button[contains(normalize-space(.),'Szukaj')]",
+            "//button[contains(normalize-space(.),'Wyszukaj')]",
+            "//button[contains(@class,'primary')]",
+        ):
+            els = driver.find_elements(By.XPATH, xp)
+            els = [e for e in els if e.is_displayed()]
+            if els:
+                search_btn = els[0]
+                print(f"[info] Przycisk szukaj znaleziony: xpath={xp}")
+                break
+        if search_btn is None:
+            # Dump listę wszystkich widocznych przycisków
+            btns = driver.find_elements(By.TAG_NAME, "button")
+            print("[debug] Widoczne przyciski:")
+            for b in btns:
+                if b.is_displayed():
+                    print(f"  - '{b.text.strip()}' class={b.get_attribute('class')}")
+            raise RuntimeError("Nie znaleziono przycisku wyszukiwania.")
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block:'center'});", search_btn
         )
         safe_click(driver, search_btn)
 
