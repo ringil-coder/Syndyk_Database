@@ -583,8 +583,13 @@ def fetch_details_for_links(rows_data: list[list]) -> None:
                 rows_data[idx - 1].extend(["", "", ""])
                 continue
             print(f"[info] ({idx}/{len(urls)}) Pobieram szczegóły: {url}")
+            # Wymuś pełne przeładowanie — bez tego Angular/SPA nie
+            # przerendruje widoku, gdy trasa hash-a jest identyczna.
+            driver.switch_to.default_content()
+            driver.get("about:blank")
+            time.sleep(0.3)
             driver.get(url)
-            time.sleep(3)
+            time.sleep(4)
 
             # KRZ ładuje szczegóły w iframe — przełącz się
             switched = False
