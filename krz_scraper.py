@@ -260,10 +260,36 @@ def scrape() -> list[list]:
         safe_click(driver, extra)
         time.sleep(1)
 
-        # 5-7) Zwiń / odkliknij trzy podpanele kategorii (odznacz)
-        #    (tu: "odklikięcie" = zwinięcie / wyczyszczenie — zachowujemy
-        #    domyślne zaznaczenia, zwijając panele aby nie zaznaczać
-        #    dodatkowych kategorii)
+        # 5-7) Zwijanie odbywa się później, po rozwinięciu wszystkich
+        # paneli w kroku 8.
+
+        # 8) W kategoriach obwieszczeń wybierz TYLKO pozycję dotyczącą
+        #    obwieszczeń o masie upadłości.
+        # Najpierw rozwiń wszystkie zwinięte panele w sekcji "dodatkowe
+        # parametry", żeby checkboxy (w tym "masa upadłości") były
+        # widoczne i klikalne. Panel #ui-panel-9-label (kategorie
+        # obwieszczeń) często jest domyślnie zwinięty.
+        togglers = driver.find_elements(
+            By.CSS_SELECTOR,
+            "p-panel a.ui-panel-titlebar-icon",
+        )
+        print(f"[info] Znaleziono {len(togglers)} togglerów paneli.")
+        for t in togglers:
+            try:
+                icon = t.find_element(By.TAG_NAME, "span")
+                cls = icon.get_attribute("class") or ""
+                if "plus" in cls:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", t
+                    )
+                    driver.execute_script("arguments[0].click();", t)
+                    time.sleep(0.3)
+            except Exception:
+                pass
+        time.sleep(0.8)
+
+        # Zwiń z powrotem 3 panele z postępowaniami, żeby ich checkboxy
+        # nie zostały zaznaczone.
         for header in (
             "Postępowania restrukturyzacyjne",
             "Postępowania upadłościowe",
@@ -273,43 +299,45 @@ def scrape() -> list[list]:
                 collapse_panel_by_header(driver, header)
             except Exception:
                 pass
+        time.sleep(0.5)
 
-        # 8) W kategoriach obwieszczeń wybierz TYLKO pozycję dotyczącą
-        #    obwieszczeń o masie upadłości (9. checkbox w panelu kategorii
-        #    obwieszczeń).
-        category_panel = wait.until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "[id^='ui-panel-'][id$='-content']")
-            )
-        )
-        # Najpierw odznacz wszystko w panelu kategorii obwieszczeń,
-        # potem zaznacz 9. pozycję.
+        # Odznacz wszystkie widoczne, zaznaczone checkboxy
         checkboxes = driver.find_elements(
             By.CSS_SELECTOR,
-            "app-wyszukiwanie-obwieszczen-view p-checkbox .ui-chkbox-box",
+            "p-checkbox .ui-chkbox-box",
         )
-        # odznacz zaznaczone
         for cb in checkboxes:
             cls = cb.get_attribute("class") or ""
-            if "ui-state-active" in cls:
-                safe_click(driver, cb)
-                time.sleep(0.05)
+            if "ui-state-active" in cls and cb.is_displayed():
+                try:
+                    driver.execute_script("arguments[0].click();", cb)
+                    time.sleep(0.05)
+                except Exception:
+                    pass
 
-        # zaznacz pozycję "Obwieszczenie o ustaleniu składu masy upadłości"
+        # Zaznacz pozycję zawierającą "masy upadłości" w etykiecie
         target = None
-        for cb in driver.find_elements(
+        for lbl in driver.find_elements(
             By.XPATH,
-            "//label[contains(translate(., 'MASY UPADŁOŚCI', 'masy upadłości'),"
-            " 'masy upadłości')]",
+            "//label[contains(translate(., "
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZĄĆĘŁŃÓŚŹŻ', "
+            "'abcdefghijklmnopqrstuvwxyząćęłńóśźż'), 'masy upadłości')]",
         ):
-            target = cb
-            break
+            if lbl.is_displayed():
+                target = lbl
+                break
         if target is not None:
-            safe_click(driver, target)
+            print(f"[info] Zaznaczam: '{target.text.strip()}'")
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", target
+            )
+            driver.execute_script("arguments[0].click();", target)
         else:
-            # fallback — 9. checkbox w ostatnim panelu
-            if len(checkboxes) >= 9:
-                safe_click(driver, checkboxes[8])
+            print("[warn] Nie znaleziono etykiety 'masy upadłości'.")
+            # fallback — 9. widoczny checkbox
+            visible = [c for c in checkboxes if c.is_displayed()]
+            if len(visible) >= 9:
+                driver.execute_script("arguments[0].click();", visible[8])
         time.sleep(0.5)
 
         # 9) Kliknij przycisk "Szukaj" / "Wyszukaj"
