@@ -89,7 +89,7 @@ def set_date_range_last_month(driver) -> None:
     wait = WebDriverWait(driver, DEFAULT_WAIT)
 
     today = date.today()
-    month_ago = today - timedelta(days=14)
+    month_ago = today - timedelta(days=2)
     fmt = "%d.%m.%Y"
 
     # Inputy dat (są wewnątrz panelu "Zakres dat publikacji") — pierwsze dwa
