@@ -10,6 +10,8 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
     env:
       KRZ_HEADLESS: "1"
     steps:
