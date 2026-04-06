@@ -89,7 +89,7 @@ def set_date_range_last_month(driver) -> None:
     wait = WebDriverWait(driver, DEFAULT_WAIT)
 
     today = date.today()
-    month_ago = today - timedelta(days=2)
+    time_delta_range = today - timedelta(days=2)
     fmt = "%d.%m.%Y"
 
     # Inputy dat (są wewnątrz panelu "Zakres dat publikacji") — pierwsze dwa
@@ -102,7 +102,7 @@ def set_date_range_last_month(driver) -> None:
     if len(date_inputs) < 2:
         raise RuntimeError("Nie znaleziono pól zakresu dat.")
 
-    for inp, value in zip(date_inputs[:2], (month_ago.strftime(fmt), today.strftime(fmt))):
+    for inp, value in zip(date_inputs[:2], (time_delta_range.strftime(fmt), today.strftime(fmt))):
         inp.click()
         inp.send_keys(Keys.CONTROL, "a")
         inp.send_keys(Keys.DELETE)
