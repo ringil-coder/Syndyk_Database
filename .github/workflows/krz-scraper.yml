@@ -31,27 +31,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install selenium openpyxl webdriver-manager
 
-      - name: Run scraper
+      - name: Run scraper (save to SQLite)
         run: python krz_scraper.py
 
-      - name: Upload result (artifact)
+      - name: Generate Excel from DB
+        run: python generate_excel.py
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: obwieszczenia-${{ github.run_id }}
-          path: obwieszczenia_masa_upadlosci.xlsx
-          if-no-files-found: error
+          path: |
+            obwieszczenia.db
+            obwieszczenia_masa_upadlosci.xlsx
+          if-no-files-found: warn
           retention-days: 30
 
-      - name: Commit result to repo
+      - name: Commit results to repo
         run: |
-          if [ -f obwieszczenia_masa_upadlosci.xlsx ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add obwieszczenia_masa_upadlosci.xlsx
-            if ! git diff --cached --quiet; then
-              git commit -m "chore(data): daily KRZ scrape $(date -u +%Y-%m-%d)"
-              git push
-            else
-              echo "No changes to commit."
-            fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add obwieszczenia.db obwieszczenia_masa_upadlosci.xlsx
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(data): daily KRZ scrape $(date -u +%Y-%m-%d)"
+            git push
+          else
+            echo "No changes to commit."
           fi

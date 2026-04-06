@@ -5,26 +5,18 @@ ze strony https://krz.ms.gov.pl/
 Wymagania:
     pip install selenium openpyxl webdriver-manager
 
-    (webdriver-manager automatycznie pobiera ChromeDriver pasujący do
-    zainstalowanej wersji Chrome, dzięki czemu nie ma znaczenia jaki
-    chromedriver znajduje się w PATH.)
-
-Uwaga:
-    Strona https://krz.ms.gov.pl/ jest aplikacją Angular, więc do pobrania
-    danych konieczny jest Selenium (sama biblioteka requests nie wystarczy).
-    Selektory CSS zawierają dynamiczne identyfikatory Angulara (ng-tns-c15-XX),
-    dlatego w miarę możliwości używamy zapytań niezależnych od tych numerów.
+Dane zapisywane są do bazy SQLite (obwieszczenia.db).
+Klucz główny: Numer obwieszczenia.
 """
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 from datetime import date, timedelta
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Font
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -35,9 +27,26 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 
 BASE_URL = "https://krz.ms.gov.pl/"
-OUTPUT_FILE = Path(__file__).parent / "obwieszczenia_masa_upadlosci.xlsx"
+DB_FILE = Path(__file__).parent / "obwieszczenia.db"
 DEFAULT_WAIT = 20
 HEADLESS = os.environ.get("KRZ_HEADLESS", "").lower() in ("1", "true", "yes")
+
+# Nazwy kolumn wyciąganych ze szczegółów obwieszczenia
+DETAIL_COLUMNS: list[str] = [
+    "Data obwieszczenia",
+    "Numer obwieszczenia",
+    "Sygnatura",
+    "Imię",
+    "Nazwisko",
+    "Miejsce zamieszkania",
+    "Rodzaj podmiotu",
+    "PESEL",
+    "NIP",
+    "Sąd",
+    "Wydział",
+    "Treść obwieszczenia",
+    "Link",
+]
 
 
 def build_driver(headless: bool = True) -> webdriver.Chrome:
@@ -80,7 +89,7 @@ def set_date_range_last_month(driver) -> None:
     wait = WebDriverWait(driver, DEFAULT_WAIT)
 
     today = date.today()
-    month_ago = today - timedelta(days=14)
+    time_delta_range = today - timedelta(days=2)
     fmt = "%d.%m.%Y"
 
     # Inputy dat (są wewnątrz panelu "Zakres dat publikacji") — pierwsze dwa
@@ -93,7 +102,7 @@ def set_date_range_last_month(driver) -> None:
     if len(date_inputs) < 2:
         raise RuntimeError("Nie znaleziono pól zakresu dat.")
 
-    for inp, value in zip(date_inputs[:2], (month_ago.strftime(fmt), today.strftime(fmt))):
+    for inp, value in zip(date_inputs[:2], (time_delta_range.strftime(fmt), today.strftime(fmt))):
         inp.click()
         inp.send_keys(Keys.CONTROL, "a")
         inp.send_keys(Keys.DELETE)
@@ -560,21 +569,7 @@ def scrape() -> list[list]:
         driver.quit()
 
 
-# Nazwy kolumn wyciąganych ze szczegółów obwieszczenia
-DETAIL_COLUMNS: list[str] = [
-    "Data obwieszczenia",
-    "Numer obwieszczenia",
-    "Sygnatura",
-    "Imię",
-    "Nazwisko",
-    "Miejsce zamieszkania",
-    "Rodzaj podmiotu",
-    "PESEL",
-    "NIP",
-    "Sąd",
-    "Wydział",
-    "Treść obwieszczenia",
-]
+# (DETAIL_COLUMNS zdefiniowane na początku pliku)
 
 
 def _parse_panel_tables(panel_el) -> dict:
@@ -695,71 +690,101 @@ def fetch_details_for_links(rows_data: list[list]) -> list[dict]:
     return details
 
 
-def scrape_with_details() -> tuple[list, list[list]]:
+def scrape_with_details() -> list[dict]:
+    """Zwraca listę słowników {kolumna: wartość} z pełnymi szczegółami."""
     data = scrape()
-    table_headers = list(data[0])
     rows_data = [list(r) for r in data[1:]]
 
     details = fetch_details_for_links(rows_data)
 
-    # Składamy finalną tabelę:
-    # kolumny oryginalne z listy wyników + szczegóły + Link
-    headers = table_headers + DETAIL_COLUMNS + ["Link"]
-    final_rows: list[list] = []
+    records: list[dict] = []
     for row, record in zip(rows_data, details):
-        # wyciągnij link z wiersza listy wyników
         link = ""
         for cell in row:
             if isinstance(cell, dict) and cell.get("href"):
                 link = cell["href"]
                 break
-        extra = [record.get(col, "") for col in DETAIL_COLUMNS]
-        final_rows.append(list(row) + extra + [{"text": link, "href": link}
-                                                if link else ""])
-    return headers, final_rows
+        record["Link"] = link
+        records.append(record)
+    return records
 
 
-def save_to_excel(data: list[list], path: Path) -> None:
-    if not data:
-        print("Brak danych do zapisania.")
-        return
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Obwieszczenia"
+# --------------- SQLite ---------------
 
-    headers = data[0]
-    ws.append(headers)
-    for c in ws[1]:
-        c.font = Font(bold=True)
-
-    link_font = Font(color="0563C1", underline="single")
-    for row in data[1:]:
-        ws.append([
-            cell["text"] if isinstance(cell, dict) else cell for cell in row
-        ])
-        r = ws.max_row
-        for col_idx, cell in enumerate(row, start=1):
-            if isinstance(cell, dict) and cell.get("href"):
-                xcell = ws.cell(row=r, column=col_idx)
-                xcell.hyperlink = cell["href"]
-                xcell.font = link_font
-
-    for col_idx, _ in enumerate(headers, start=1):
-        col_letter = ws.cell(row=1, column=col_idx).column_letter
-        max_len = max(
-            (len(str(ws.cell(row=i, column=col_idx).value or ""))
-             for i in range(1, ws.max_row + 1)),
-            default=10,
+def init_db(db_path: Path = DB_FILE) -> sqlite3.Connection:
+    """Tworzy bazę danych i tabelę jeśli nie istnieje."""
+    conn = sqlite3.connect(db_path)
+    # Kolumny bazodanowe — snake_case
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS obwieszczenia (
+            numer_obwieszczenia TEXT PRIMARY KEY,
+            data_obwieszczenia  TEXT,
+            sygnatura           TEXT,
+            imie                TEXT,
+            nazwisko            TEXT,
+            miejsce_zamieszkania TEXT,
+            rodzaj_podmiotu     TEXT,
+            pesel               TEXT,
+            nip                 TEXT,
+            sad                 TEXT,
+            wydzial             TEXT,
+            tresc_obwieszczenia TEXT,
+            link                TEXT
         )
-        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+    """)
+    conn.commit()
+    return conn
 
-    wb.save(path)
-    print(f"Zapisano {ws.max_row - 1} wierszy do {path}")
+
+# Mapowanie: nazwa kolumny z DETAIL_COLUMNS -> kolumna w SQLite
+_COL_MAP: dict[str, str] = {
+    "Data obwieszczenia":  "data_obwieszczenia",
+    "Numer obwieszczenia": "numer_obwieszczenia",
+    "Sygnatura":           "sygnatura",
+    "Imię":                "imie",
+    "Nazwisko":            "nazwisko",
+    "Miejsce zamieszkania":"miejsce_zamieszkania",
+    "Rodzaj podmiotu":     "rodzaj_podmiotu",
+    "PESEL":               "pesel",
+    "NIP":                 "nip",
+    "Sąd":                 "sad",
+    "Wydział":             "wydzial",
+    "Treść obwieszczenia": "tresc_obwieszczenia",
+    "Link":                "link",
+}
+
+DB_COLS = list(_COL_MAP.values())
+
+
+def save_to_db(records: list[dict], db_path: Path = DB_FILE) -> int:
+    """Zapisuje rekordy do SQLite. Pomija duplikaty (INSERT OR IGNORE).
+    Zwraca liczbę nowo dodanych wierszy."""
+    conn = init_db(db_path)
+    placeholders = ", ".join(["?"] * len(DB_COLS))
+    cols_sql = ", ".join(DB_COLS)
+    inserted = 0
+    for rec in records:
+        numer = rec.get("Numer obwieszczenia", "")
+        if not numer:
+            continue
+        values = tuple(rec.get(detail_col, "")
+                       for detail_col in DETAIL_COLUMNS)
+        cur = conn.execute(
+            f"INSERT OR IGNORE INTO obwieszczenia ({cols_sql}) "
+            f"VALUES ({placeholders})",
+            values,
+        )
+        inserted += cur.rowcount
+    conn.commit()
+    total = conn.execute("SELECT COUNT(*) FROM obwieszczenia").fetchone()[0]
+    conn.close()
+    print(f"[db] Dodano {inserted} nowych rekordów (łącznie w bazie: {total}).")
+    return inserted
 
 
 def main() -> None:
-    headers, rows_data = scrape_with_details()
-    save_to_excel([headers, *rows_data], OUTPUT_FILE)
+    records = scrape_with_details()
+    save_to_db(records)
 
 
 if __name__ == "__main__":
