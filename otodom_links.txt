@@ -1,0 +1,10 @@
+https://www.otodom.pl/pl/wyniki/sprzedaz/mieszkanie/mazowieckie/warszawa/warszawa/warszawa?distanceRadius=75&limit=36&ownerTypeSingleSelect=ALL&description=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/kawalerka/mazowieckie/warszawa/warszawa/warszawa?ownerTypeSingleSelect=ALL&distanceRadius=75&description=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/dom/mazowieckie/warszawa/warszawa/warszawa?distanceRadius=75&limit=36&ownerTypeSingleSelect=ALL&description=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/inwestycja/mazowieckie/warszawa/warszawa/warszawa?distanceRadius=75&investmentName=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/pokoj/mazowieckie/warszawa/warszawa/warszawa?distanceRadius=75&description=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/mazowieckie/warszawa/warszawa/warszawa?distanceRadius=75&limit=36&description=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/lokal/mazowieckie/warszawa/warszawa/warszawa?distanceRadius=75&limit=36&ownerTypeSingleSelect=ALL&description=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/haleimagazyny/mazowieckie/warszawa/warszawa/warszawa?ownerTypeSingleSelect=ALL&distanceRadius=75&description=syndyk&by=DEFAULT&direction=DESC
+https://www.otodom.pl/pl/wyniki/sprzedaz/garaz/mazowieckie/warszawa/warszawa/warszawa?ownerTypeSingleSelect=ALL&distanceRadius=75&description=syndyk&by=DEFAULT&direction=DESC
+
