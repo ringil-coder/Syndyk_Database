@@ -648,6 +648,32 @@ class PortalScraper(ABC):
                 print(f"[{self.PORTAL_NAME}] Blad ekstrakcji strona {page_num}: {exc}")
                 break
 
+            # Diagnostyka gdy brak ogloszen na pierwszej stronie
+            if page_num == 1 and not page_listings:
+                try:
+                    diag = self.driver.execute_script("""
+                        return {
+                            title: document.title,
+                            url: window.location.href,
+                            links: document.querySelectorAll('a[href]').length,
+                            articles: document.querySelectorAll('article').length,
+                            divs: document.querySelectorAll('div').length,
+                            bodyLen: (document.body.innerText || '').length,
+                            sampleLinks: Array.from(
+                                document.querySelectorAll('a[href]')
+                            ).slice(0, 15).map(a => a.href)
+                        };
+                    """)
+                    print(f"  [{self.PORTAL_NAME}] DIAG: title='{diag.get('title')}'")
+                    print(f"  [{self.PORTAL_NAME}] DIAG: url={diag.get('url')}")
+                    print(f"  [{self.PORTAL_NAME}] DIAG: links={diag.get('links')} "
+                          f"articles={diag.get('articles')} divs={diag.get('divs')} "
+                          f"bodyLen={diag.get('bodyLen')}")
+                    for lnk in (diag.get('sampleLinks') or []):
+                        print(f"  [{self.PORTAL_NAME}] DIAG link: {lnk[:100]}")
+                except Exception:
+                    pass
+
             for listing in page_listings:
                 listing.setdefault("portal", self.PORTAL_NAME)
                 listing.setdefault("typ_nieruchomosci", property_type)
@@ -1851,103 +1877,160 @@ class LentoScraper(PortalScraper):
         return listings
 
     def _extract_by_links(self) -> list[dict]:
-        """Fallback: ekstrakcja ogloszen przez wyszukanie linkow do ofert."""
+        """Fallback: ekstrakcja ogloszen przez analizu wszystkich linkow na stronie.
+
+        Nie znamy dokladnej struktury URL Lento, wiec:
+        1. Zbieramy wszystkie <a href> przez JS (szybciej niz Selenium find_elements)
+        2. Odfiltrujemy linki wewnetrzne portalu ktore prowadza do podstron
+           (paginacja, kategorie, statyczne) - zostawiamy linki do ogloszen
+        """
         listings: list[dict] = []
-        # Lento URL pattern: subdomena.lento.pl/ogloszenie-tytul-iNNNNNN.html
-        # lub lento.pl/...
-        all_links = self.driver.find_elements(By.TAG_NAME, "a")
+
+        # Wyciagnij wszystkie linki przez JS - szybciej niz iteracja Selenium
+        try:
+            link_data = self.driver.execute_script("""
+                var results = [];
+                var links = document.querySelectorAll('a[href]');
+                var baseHost = window.location.hostname;
+                for (var i = 0; i < links.length; i++) {
+                    var a = links[i];
+                    var href = a.href || '';
+                    if (!href || href.startsWith('javascript:')) continue;
+
+                    // Szukaj linkow do ogloszen - pomijaj nawigacje/kategorie
+                    // Heurystyka: link do ogloszenia ma dluzszy path niz /kategoria/
+                    var pathParts = new URL(href).pathname.split('/').filter(Boolean);
+                    if (pathParts.length < 2) continue;
+
+                    // Pomijaj typowe strony nawigacji
+                    var lower = href.toLowerCase();
+                    if (lower.indexOf('/q-') !== -1 && lower.endsWith('/')) continue;
+                    if (lower.indexOf('?page=') !== -1) continue;
+                    if (lower.indexOf('/regulamin') !== -1) continue;
+                    if (lower.indexOf('/polityka') !== -1) continue;
+                    if (lower.indexOf('/kontakt') !== -1) continue;
+                    if (lower.indexOf('/logowanie') !== -1) continue;
+                    if (lower.indexOf('/rejestracja') !== -1) continue;
+                    if (lower.indexOf('/pomoc') !== -1) continue;
+                    if (lower.indexOf('/moje-konto') !== -1) continue;
+
+                    // Link musi byc na domenie lento
+                    if (href.indexOf('lento.pl') === -1) continue;
+
+                    // Szukaj typowych patternow ogloszen:
+                    // - URL konczacy sie na .html
+                    // - URL z numerycznym ID (np. -i12345, -12345, /12345)
+                    // - URL z dlugi slug (>20 znakow)
+                    var isAd = false;
+                    if (href.endsWith('.html')) isAd = true;
+                    if (/[-/]i?\d{4,}/.test(href) && pathParts.length >= 2) isAd = true;
+                    if (pathParts[pathParts.length-1].length > 20) isAd = true;
+
+                    if (!isAd) continue;
+
+                    // Zbierz tekst kontekstu (rodzic)
+                    var parent = a;
+                    var text = '';
+                    for (var j = 0; j < 5; j++) {
+                        if (parent.parentElement) {
+                            parent = parent.parentElement;
+                            text = parent.innerText || '';
+                            if (text.length > 30) break;
+                        }
+                    }
+
+                    results.push({
+                        href: href.split('?')[0].split('#')[0],
+                        text: a.innerText || '',
+                        context: text.substring(0, 500)
+                    });
+                }
+                return results;
+            """)
+        except Exception as exc:
+            print(f"  [lento] JS link extraction error: {exc}")
+            link_data = []
+
+        if not link_data:
+            # Debug: wyswietl co jest na stronie
+            try:
+                page_info = self.driver.execute_script("""
+                    var all_a = document.querySelectorAll('a[href]');
+                    var samples = [];
+                    for (var i = 0; i < Math.min(all_a.length, 20); i++) {
+                        samples.push(all_a[i].href);
+                    }
+                    return {
+                        title: document.title,
+                        url: window.location.href,
+                        totalLinks: all_a.length,
+                        sampleLinks: samples,
+                        bodyLength: document.body.innerText.length,
+                        bodyStart: document.body.innerText.substring(0, 300)
+                    };
+                """)
+                print(f"  [lento] DEBUG: title={page_info.get('title')}")
+                print(f"  [lento] DEBUG: url={page_info.get('url')}")
+                print(f"  [lento] DEBUG: totalLinks={page_info.get('totalLinks')}")
+                print(f"  [lento] DEBUG: bodyLen={page_info.get('bodyLength')}")
+                print(f"  [lento] DEBUG: body={page_info.get('bodyStart', '')[:200]}")
+                for lnk in (page_info.get('sampleLinks') or [])[:10]:
+                    print(f"  [lento] DEBUG link: {lnk}")
+            except Exception:
+                pass
+            return []
 
         seen: set[str] = set()
-        for link in all_links:
-            try:
-                href = link.get_attribute("href") or ""
-                if not href:
-                    continue
-                # Szukaj linkow do ogloszen na lento.pl
-                # Pattern: -iNNNNNN.html lub /ogloszenie/ itp.
-                is_ad = (
-                    re.search(r'lento\.pl/.*-i\d{4,}\.html', href)
-                    or re.search(r'lento\.pl/.*-s\d{4,}', href)
-                    or re.search(r'lento\.pl/[^/]+/[^/]+-\d{5,}', href)
-                )
-                if not is_ad:
-                    continue
-                # Odfiltruj strony kategorii/paginacji
-                if '/q-' in href and href.endswith('/'):
-                    continue
-                clean_url = href.split("?")[0].split("#")[0]
-                if clean_url in seen:
-                    continue
-                seen.add(clean_url)
-
-                # Wyciagnij dane z kontekstu
-                parent = link
-                for _ in range(5):
-                    try:
-                        parent = parent.find_element(By.XPATH, "..")
-                        parent_text = parent.text or ""
-                        if len(parent_text) > 30:
-                            break
-                    except Exception:
-                        break
-
-                card_text = parent.text or link.text or ""
-                title = link.text.strip() if link.text else ""
-                if not title:
-                    title_els = parent.find_elements(
-                        By.CSS_SELECTOR, "h2, h3, h4, [class*='title']"
-                    )
-                    if title_els:
-                        title = title_els[0].text.strip()
-
-                cena, waluta = None, "PLN"
-                price_match = re.search(
-                    r'(\d[\d\s]*[\d])\s*(?:z[lł]|PLN|EUR|USD)',
-                    card_text, re.IGNORECASE
-                )
-                if price_match:
-                    cena, waluta = normalize_price(price_match.group(0))
-
-                area = None
-                area_match = re.search(
-                    r"(\d[\d\s,]*[,.]?\d*)\s*m[2\u00b2]", card_text
-                )
-                if area_match:
-                    area = normalize_area(area_match.group(1))
-
-                rooms = None
-                rooms_match = re.search(
-                    r"(\d+)\s*poko[ji]", card_text, re.IGNORECASE
-                )
-                if rooms_match:
-                    rooms = int(rooms_match.group(1))
-
-                location_text = ""
-                loc_els = parent.find_elements(
-                    By.CSS_SELECTOR,
-                    "[class*='location'], [class*='address'], "
-                    "[class*='city'], [class*='miejsce']"
-                )
-                if loc_els:
-                    location_text = loc_els[0].text.strip()
-
-                miasto = ""
-                if location_text:
-                    loc_parts = [p.strip() for p in location_text.split(",")]
-                    if loc_parts:
-                        miasto = loc_parts[0]
-
-                listings.append({
-                    "url": clean_url,
-                    "tytul": title,
-                    "cena": cena,
-                    "waluta": waluta,
-                    "powierzchnia_m2": area,
-                    "liczba_pokoi": rooms,
-                    "miasto": miasto,
-                })
-            except Exception:
+        for item in link_data:
+            href = item.get("href", "")
+            if not href or href in seen:
                 continue
+            seen.add(href)
+
+            card_text = item.get("context", "") or item.get("text", "")
+            title = item.get("text", "").strip()
+
+            cena, waluta = None, "PLN"
+            price_match = re.search(
+                r'(\d[\d\s]*[\d])\s*(?:z[lł]|PLN|EUR|USD)',
+                card_text, re.IGNORECASE
+            )
+            if price_match:
+                cena, waluta = normalize_price(price_match.group(0))
+
+            area = None
+            area_match = re.search(
+                r"(\d[\d\s,]*[,.]?\d*)\s*m[2\u00b2]", card_text
+            )
+            if area_match:
+                area = normalize_area(area_match.group(1))
+
+            rooms = None
+            rooms_match = re.search(
+                r"(\d+)\s*poko[ji]", card_text, re.IGNORECASE
+            )
+            if rooms_match:
+                rooms = int(rooms_match.group(1))
+
+            miasto = ""
+            # Sprobuj wyciagnac miasto z URL (subdomena: warszawa.lento.pl)
+            url_match = re.match(r'https?://(\w+)\.lento\.pl', href)
+            if url_match:
+                subdomain = url_match.group(1)
+                if subdomain not in ("www", "mazowieckie", "lento"):
+                    miasto = subdomain.capitalize()
+
+            listings.append({
+                "url": href,
+                "tytul": title,
+                "cena": cena,
+                "waluta": waluta,
+                "powierzchnia_m2": area,
+                "liczba_pokoi": rooms,
+                "miasto": miasto,
+            })
+
+        print(f"  [lento] _extract_by_links: znaleziono {len(listings)} ogloszen")
         return listings
 
     def _parse_card(self, card) -> dict:
@@ -1956,16 +2039,30 @@ class LentoScraper(PortalScraper):
         links = card.find_elements(By.CSS_SELECTOR, "a[href*='lento.pl']")
         if not links:
             links = card.find_elements(By.TAG_NAME, "a")
-        if links:
-            href = links[0].get_attribute("href") or ""
+        for lnk in links:
+            href = lnk.get_attribute("href") or ""
             if href.startswith("/"):
                 href = "https://lento.pl" + href
-            if "lento.pl" in href and "/q-" not in href:
-                url = href
+            if "lento.pl" not in href:
+                continue
+            # Odfiltruj nawigacje
+            if "/q-" in href and href.endswith("/"):
+                continue
+            if any(s in href for s in ["/regulamin", "/polityka", "/kontakt",
+                                        "/logowanie", "/rejestracja", "/pomoc"]):
+                continue
+            # Akceptuj: .html, numeryczne ID, dlugi slug
+            path_parts = urlparse(href).path.strip("/").split("/")
+            last_part = path_parts[-1] if path_parts else ""
+            if (href.endswith(".html")
+                    or re.search(r'i?\d{4,}', last_part)
+                    or len(last_part) > 20):
+                url = href.split("?")[0].split("#")[0]
+                break
 
         # Tytul
         title = ""
-        for sel in ["h2 a", "h3 a", "[class*='title']", "a"]:
+        for sel in ["h2 a", "h3 a", "h2", "h3", "h4", "[class*='title']", "a"]:
             els = card.find_elements(By.CSS_SELECTOR, sel)
             if els and els[0].text.strip():
                 title = els[0].text.strip()
