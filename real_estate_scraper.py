@@ -411,10 +411,74 @@ class PortalScraper(ABC):
 
     PORTAL_NAME: str = ""
 
+    # Selektory iframe consent specyficzne dla portalu (do nadpisania w subklasach)
+    _IFRAME_SELECTORS: list[str] = []
+    # Selektory przyciskow wewnatrz iframe consent
+    _IFRAME_BTN_SELECTORS: list[str] = []
+    # Dodatkowe selektory overlay do usuniecia JS-em
+    _OVERLAY_SELECTORS: list[str] = []
+
     def __init__(self, driver: webdriver.Chrome):
         self.driver = driver
         self.wait = WebDriverWait(driver, DEFAULT_WAIT)
         self._cookies_dismissed = False
+
+    def _ensure_no_overlay(self) -> None:
+        """Upewnia sie ze cookie overlay nie blokuje strony.
+
+        Subklasy moga nadpisac te metode z wlasna logika,
+        lub ustawic _IFRAME_SELECTORS / _OVERLAY_SELECTORS.
+        """
+        # 1. Sprawdz iframe consent
+        iframe_sels = self._IFRAME_SELECTORS or [
+            "iframe[id*='consent']", "iframe[src*='consent']",
+            "iframe[id*='fc-iframe']", "iframe[src*='fundingchoices']",
+            "iframe[id*='didomi']", "iframe[src*='didomi']",
+        ]
+        btn_sels = self._IFRAME_BTN_SELECTORS or [
+            "button.fc-cta-consent", "button[class*='accept']",
+            "button[class*='agree']", "button#didomi-notice-agree-button",
+        ]
+        try:
+            iframes = self.driver.find_elements(
+                By.CSS_SELECTOR, ", ".join(iframe_sels))
+            for iframe in iframes:
+                if iframe.is_displayed():
+                    self.driver.switch_to.frame(iframe)
+                    try:
+                        for sel in btn_sels:
+                            btns = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                            for btn in btns:
+                                if btn.is_displayed():
+                                    btn.click()
+                                    time.sleep(1)
+                                    break
+                    finally:
+                        self.driver.switch_to.default_content()
+        except Exception:
+            self.driver.switch_to.default_content()
+
+        # 2. Usun overlay z DOM przez JS
+        extra = self._OVERLAY_SELECTORS or []
+        all_sels = [
+            ".fc-consent-root", ".fc-dialog-overlay",
+            "#didomi-host", ".didomi-popup-container", ".didomi-popup-backdrop",
+            "#CybotCookiebotDialog", "#onetrust-consent-sdk",
+            ".cc-window", "#cookie-law-info-bar",
+            '[class*="consent-overlay"]', '[class*="cookie-overlay"]',
+            '[class*="cookie-banner"]', '[id*="cookie-banner"]',
+            '[class*="gdpr"]', '[class*="rodo"]',
+        ] + extra
+        sels_js = ", ".join(all_sels)
+        try:
+            self.driver.execute_script(f"""
+                document.querySelectorAll('{sels_js}')
+                    .forEach(function(el) {{ el.remove(); }});
+                document.body.style.overflow = 'auto';
+                document.documentElement.style.overflow = 'auto';
+            """)
+        except Exception:
+            pass
 
     def scrape_all(self, urls: list[str]) -> list[dict]:
         """Scrapuje wszystkie URL-e dla tego portalu."""
@@ -516,6 +580,11 @@ class OtodomScraper(PortalScraper):
 
     PORTAL_NAME = "otodom"
 
+    _OVERLAY_SELECTORS = [
+        "#onetrust-consent-sdk", "#onetrust-banner-sdk",
+        "[class*='onetrust']",
+    ]
+
     _TYPE_MAP = {
         "mieszkanie": "mieszkanie",
         "kawalerka": "kawalerka",
@@ -539,6 +608,8 @@ class OtodomScraper(PortalScraper):
 
     def _extract_listings_from_page(self) -> list[dict]:
         listings: list[dict] = []
+
+        self._ensure_no_overlay()
 
         # Probuj parsowac __NEXT_DATA__ (Next.js)
         try:
@@ -736,6 +807,11 @@ class OlxScraper(PortalScraper):
 
     PORTAL_NAME = "olx"
 
+    _OVERLAY_SELECTORS = [
+        "#onetrust-consent-sdk", "#onetrust-banner-sdk",
+        "[class*='onetrust']",
+    ]
+
     def _detect_property_type(self, url: str) -> str:
         path = urlparse(url).path.lower()
         if "mieszkania" in path:
@@ -752,6 +828,8 @@ class OlxScraper(PortalScraper):
 
     def _extract_listings_from_page(self) -> list[dict]:
         listings: list[dict] = []
+
+        self._ensure_no_overlay()
 
         cards = self.driver.find_elements(
             By.CSS_SELECTOR,
@@ -1407,6 +1485,10 @@ class SprzedajemyScraper(PortalScraper):
 
     PORTAL_NAME = "sprzedajemy"
 
+    _OVERLAY_SELECTORS = [
+        "[class*='cmp']", "#cmp-container",
+    ]
+
     def _detect_property_type(self, url: str) -> str:
         path = urlparse(url).path.lower()
         if "mieszkania" in path:
@@ -1423,6 +1505,8 @@ class SprzedajemyScraper(PortalScraper):
 
     def _extract_listings_from_page(self) -> list[dict]:
         listings: list[dict] = []
+
+        self._ensure_no_overlay()
 
         cards = self.driver.find_elements(
             By.CSS_SELECTOR,
