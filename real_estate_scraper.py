@@ -83,30 +83,144 @@ def safe_click(driver, element) -> None:
 
 # --------------- Narzedzia ---------------
 
-def dismiss_cookie_consent(driver) -> None:
-    """Probuje zamknac baner cookies. Nie rzuca wyjatku jesli sie nie uda."""
-    selectors = [
+def dismiss_cookie_consent(driver, portal: str = "") -> bool:
+    """Probuje zamknac baner cookies. Zwraca True jesli udalo sie kliknac.
+
+    Uzywa selektorow specyficznych dla portalu + generycznych.
+    Jesli nie znajdzie przycisku, probuje JS-owe podejscie do usuwania overlay.
+    """
+    # Selektory specyficzne dla portali
+    portal_selectors: dict[str, list[str]] = {
+        "gratka": [
+            "#didomi-notice-agree-button",
+            "button[aria-label='Zaakceptuj i zamknij']",
+            "button.didomi-components-button--color",
+            "#didomi-popup .didomi-button",
+            "button.sc-dcJsrY",  # gratka styled-components
+            "span.didomi-continue-without-agreeing",
+        ],
+        "lento": [
+            "button.fc-cta-consent",
+            "button.fc-button-background",
+            ".fc-consent-root button[aria-label*='consent' i]",
+            ".fc-consent-root .fc-cta-consent",
+            "button[title='Akceptuję' i]",
+            "a.fc-cta-consent",
+            "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+            "button[id*='rodo' i]",
+            "button[class*='rodo' i]",
+            "div.cc-window button.cc-btn",
+            "div.cc-window a.cc-btn",
+        ],
+        "nieruchomosci": [
+            "button.fc-cta-consent",
+            "button.fc-button-background",
+            ".fc-consent-root .fc-cta-consent",
+            "button[title='Akceptuję' i]",
+            "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+            "button.cmp-button_button",
+            "button[class*='cmp' i]",
+            "#cookieConsentAcceptButton",
+            "button[class*='cookie-accept']",
+            "div.cc-window button.cc-btn",
+        ],
+    }
+
+    # Generyczne selektory (fallback)
+    generic_selectors = [
         "button#onetrust-accept-btn-handler",
         "button[data-testid='accept-all']",
         "button.cmp-button_button",
+        "#didomi-notice-agree-button",
+        "button.fc-cta-consent",
         "button[id*='cookie' i]",
         "button[class*='accept' i]",
         "button[class*='consent' i]",
         "button[class*='agree' i]",
         "a[class*='accept' i]",
-        "#didomi-notice-agree-button",
         ".cookie-close",
         "[data-action='accept-cookies']",
+        "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+        "button[class*='cookie-accept']",
     ]
+
+    # Najpierw selektory specyficzne dla portalu
+    selectors = portal_selectors.get(portal, []) + generic_selectors
+
     for sel in selectors:
         try:
             btn = driver.find_element(By.CSS_SELECTOR, sel)
             if btn.is_displayed():
-                btn.click()
-                time.sleep(0.5)
-                return
+                try:
+                    btn.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", btn)
+                time.sleep(1.0)
+                return True
         except Exception:
             continue
+
+    # Fallback: wyszukaj przycisk po tekscie (polskie portale)
+    accept_texts = [
+        "Akceptuję", "Akceptuj", "Zgadzam się", "Zgadzam sie",
+        "Wyrażam zgodę", "Wyrazam zgode", "Przejdź do serwisu",
+        "Przejdz do serwisu", "OK", "Rozumiem",
+        "Zaakceptuj", "Akceptuj wszystko", "Accept all",
+        "Kontynuuj", "Przejdź dalej",
+    ]
+    for text in accept_texts:
+        try:
+            btns = driver.find_elements(
+                By.XPATH,
+                f"//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                f"'abcdefghijklmnopqrstuvwxyz'), '{text.lower()}')] | "
+                f"//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                f"'abcdefghijklmnopqrstuvwxyz'), '{text.lower()}')]"
+            )
+            for btn in btns:
+                if btn.is_displayed():
+                    try:
+                        btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(1.0)
+                    return True
+        except Exception:
+            continue
+
+    # Ostateczny fallback: usun overlay i iframe cookie z DOM
+    try:
+        driver.execute_script("""
+            // Usun popularne cookie overlay
+            var selectors = [
+                '#didomi-host', '.fc-consent-root', '#CybotCookiebotDialog',
+                '#onetrust-consent-sdk', '.cc-window', '#cookie-law-info-bar',
+                '[class*="cookie-overlay"]', '[class*="consent-overlay"]',
+                '[id*="cookie-banner"]', '[class*="cookie-banner"]',
+                '[class*="gdpr"]', '[class*="rodo"]'
+            ];
+            selectors.forEach(function(s) {
+                document.querySelectorAll(s).forEach(function(el) { el.remove(); });
+            });
+            // Usun backdrop/overlay blokujacy klikniecia
+            document.querySelectorAll('[class*="overlay"]').forEach(function(el) {
+                var style = window.getComputedStyle(el);
+                if (style.position === 'fixed' || style.position === 'absolute') {
+                    if (parseFloat(style.zIndex) > 100 || style.zIndex === 'auto') {
+                        el.remove();
+                    }
+                }
+            });
+            // Przywroc scroll na body
+            document.body.style.overflow = 'auto';
+            document.documentElement.style.overflow = 'auto';
+        """)
+        time.sleep(0.5)
+        return True  # overlay usuniete JS-em
+    except Exception:
+        pass
+
+    return False
 
 
 def normalize_price(price_text: str) -> tuple[float | None, str]:
@@ -328,10 +442,19 @@ class PortalScraper(ABC):
         self.driver.get(url)
         time.sleep(3)
 
+        # Probuj zamknac cookies na kazdej nowej stronie (baner moze sie pojawic ponownie)
         if not self._cookies_dismissed:
-            dismiss_cookie_consent(self.driver)
-            self._cookies_dismissed = True
-            time.sleep(1)
+            dismissed = dismiss_cookie_consent(self.driver, portal=self.PORTAL_NAME)
+            if dismissed:
+                self._cookies_dismissed = True
+                time.sleep(1)
+            else:
+                # Probuj jeszcze raz po krotkim oczekiwaniu (baner laduje sie asynchronicznie)
+                time.sleep(2)
+                dismissed = dismiss_cookie_consent(self.driver, portal=self.PORTAL_NAME)
+                if dismissed:
+                    self._cookies_dismissed = True
+                    time.sleep(1)
 
         property_type = self._detect_property_type(url)
         today = date.today().isoformat()
@@ -773,8 +896,49 @@ class GratkaScraper(PortalScraper):
                 return val
         return "inne"
 
+    def _ensure_no_overlay(self) -> None:
+        """Upewnia sie ze cookie overlay nie blokuje strony Gratka."""
+        # Gratka uzywa Didomi - sprawdz czy iframe z consent nadal istnieje
+        try:
+            iframes = self.driver.find_elements(By.CSS_SELECTOR,
+                "iframe[id*='didomi'], iframe[src*='didomi'], "
+                "iframe[id*='consent'], iframe[src*='consent']")
+            for iframe in iframes:
+                if iframe.is_displayed():
+                    # Przelacz sie do iframe i kliknij accept
+                    self.driver.switch_to.frame(iframe)
+                    try:
+                        btns = self.driver.find_elements(By.CSS_SELECTOR,
+                            "button[class*='agree'], button[class*='accept'], "
+                            "button#didomi-notice-agree-button")
+                        for btn in btns:
+                            if btn.is_displayed():
+                                btn.click()
+                                time.sleep(1)
+                                break
+                    finally:
+                        self.driver.switch_to.default_content()
+        except Exception:
+            pass
+
+        # Usun overlay JS-em na wszelki wypadek
+        try:
+            self.driver.execute_script("""
+                document.querySelectorAll(
+                    '#didomi-host, .didomi-popup-container, '
+                    + '[class*="consent-overlay"], [class*="cookie-overlay"], '
+                    + '.didomi-popup-backdrop'
+                ).forEach(function(el) { el.remove(); });
+                document.body.style.overflow = 'auto';
+                document.documentElement.style.overflow = 'auto';
+            """)
+        except Exception:
+            pass
+
     def _extract_listings_from_page(self) -> list[dict]:
         listings: list[dict] = []
+
+        self._ensure_no_overlay()
 
         cards = self.driver.find_elements(
             By.CSS_SELECTOR,
@@ -911,8 +1075,49 @@ class NieruchomosciOnlineScraper(PortalScraper):
                 return val
         return "inne"
 
+    def _ensure_no_overlay(self) -> None:
+        """Upewnia sie ze cookie overlay nie blokuje strony nieruchomosci-online."""
+        # Sprawdz iframe consent (FundingChoices / CMP)
+        try:
+            iframes = self.driver.find_elements(By.CSS_SELECTOR,
+                "iframe[id*='fc-iframe'], iframe[src*='fundingchoices'], "
+                "iframe[id*='consent'], iframe[src*='consent']")
+            for iframe in iframes:
+                if iframe.is_displayed():
+                    self.driver.switch_to.frame(iframe)
+                    try:
+                        btns = self.driver.find_elements(By.CSS_SELECTOR,
+                            "button.fc-cta-consent, button[class*='accept'], "
+                            "button[class*='agree']")
+                        for btn in btns:
+                            if btn.is_displayed():
+                                btn.click()
+                                time.sleep(1)
+                                break
+                    finally:
+                        self.driver.switch_to.default_content()
+        except Exception:
+            pass
+
+        # Usun overlay JS-em
+        try:
+            self.driver.execute_script("""
+                document.querySelectorAll(
+                    '.fc-consent-root, .fc-dialog-overlay, '
+                    + '#CybotCookiebotDialog, [class*="consent-overlay"], '
+                    + '[class*="cookie-overlay"], .cc-window, '
+                    + '[class*="cookie-banner"]'
+                ).forEach(function(el) { el.remove(); });
+                document.body.style.overflow = 'auto';
+                document.documentElement.style.overflow = 'auto';
+            """)
+        except Exception:
+            pass
+
     def _extract_listings_from_page(self) -> list[dict]:
         listings: list[dict] = []
+
+        self._ensure_no_overlay()
 
         cards = self.driver.find_elements(
             By.CSS_SELECTOR,
@@ -1043,8 +1248,49 @@ class LentoScraper(PortalScraper):
             return "garaz"
         return "inne"
 
+    def _ensure_no_overlay(self) -> None:
+        """Upewnia sie ze cookie overlay nie blokuje strony Lento."""
+        # Lento uzywa FundingChoices (fc-*) lub CookieBot
+        try:
+            iframes = self.driver.find_elements(By.CSS_SELECTOR,
+                "iframe[id*='fc-iframe'], iframe[src*='fundingchoices'], "
+                "iframe[id*='consent']")
+            for iframe in iframes:
+                if iframe.is_displayed():
+                    self.driver.switch_to.frame(iframe)
+                    try:
+                        btns = self.driver.find_elements(By.CSS_SELECTOR,
+                            "button.fc-cta-consent, button.fc-button-background, "
+                            "button[class*='accept'], button[class*='agree']")
+                        for btn in btns:
+                            if btn.is_displayed():
+                                btn.click()
+                                time.sleep(1)
+                                break
+                    finally:
+                        self.driver.switch_to.default_content()
+        except Exception:
+            pass
+
+        # Usun overlay JS-em
+        try:
+            self.driver.execute_script("""
+                document.querySelectorAll(
+                    '.fc-consent-root, .fc-dialog-overlay, '
+                    + '#CybotCookiebotDialog, .cc-window, '
+                    + '[class*="consent-overlay"], [class*="cookie-overlay"], '
+                    + '[class*="cookie-banner"], [class*="rodo"]'
+                ).forEach(function(el) { el.remove(); });
+                document.body.style.overflow = 'auto';
+                document.documentElement.style.overflow = 'auto';
+            """)
+        except Exception:
+            pass
+
     def _extract_listings_from_page(self) -> list[dict]:
         listings: list[dict] = []
+
+        self._ensure_no_overlay()
 
         cards = self.driver.find_elements(
             By.CSS_SELECTOR,
