@@ -1144,13 +1144,17 @@ class GratkaScraper(PortalScraper):
 
         self._ensure_no_overlay()
 
+        # Strategia: szukaj kart ogloszen wieloma selektorami
         cards = self.driver.find_elements(
             By.CSS_SELECTOR,
             "article[data-cy='listing'], "
             "article.teaserUnified, "
             "div.listing__item, "
             "article[class*='teaser'], "
-            "div[class*='listing'] article"
+            "div[class*='listing'] article, "
+            "li[data-gtm='zajawka'], "
+            "li[data-cy], "
+            "div[class*='snippet']"
         )
         if not cards:
             cards = self.driver.find_elements(By.CSS_SELECTOR, "article")
@@ -1162,29 +1166,153 @@ class GratkaScraper(PortalScraper):
                     listings.append(listing)
             except Exception:
                 continue
+
+        # Fallback: jesli nie znaleziono kart, szukaj linkow do ogloszen
+        if not listings:
+            listings = self._extract_by_links()
+
+        return listings
+
+    def _extract_by_links(self) -> list[dict]:
+        """Fallback: ekstrakcja ogloszen przez wyszukanie linkow do ofert."""
+        listings: list[dict] = []
+        # Gratka URL pattern: /nieruchomosci/<type>/<name>-<id>
+        links = self.driver.find_elements(
+            By.CSS_SELECTOR,
+            "a[href*='gratka.pl/nieruchomosci/']"
+        )
+        if not links:
+            links = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                "a[href*='/nieruchomosci/']"
+            )
+
+        seen: set[str] = set()
+        for link in links:
+            try:
+                href = link.get_attribute("href") or ""
+                if not href:
+                    continue
+                # Odfiltruj linki kategorii/search - szukaj linku do konkretnego ogloszenia
+                # Gratka: /nieruchomosci/mieszkanie/...-12345
+                if not re.search(r'/nieruchomosci/\w+/[\w-]+-\d{4,}', href):
+                    continue
+                # Usun query/fragment
+                clean_url = href.split("?")[0].split("#")[0]
+                if clean_url in seen:
+                    continue
+                seen.add(clean_url)
+
+                # Wyciagnij dane z kontekstu linku (rodzic)
+                parent = link
+                for _ in range(5):
+                    try:
+                        parent = parent.find_element(By.XPATH, "..")
+                        parent_text = parent.text or ""
+                        if len(parent_text) > 30:
+                            break
+                    except Exception:
+                        break
+
+                card_text = parent.text or link.text or ""
+                title = link.text.strip() if link.text else ""
+                if not title:
+                    title_els = parent.find_elements(By.CSS_SELECTOR, "h2, h3, h4")
+                    if title_els:
+                        title = title_els[0].text.strip()
+
+                cena, waluta = None, "PLN"
+                price_match = re.search(
+                    r'(\d[\d\s]*[\d])\s*(?:z[lł]|PLN|EUR|USD)',
+                    card_text, re.IGNORECASE
+                )
+                if price_match:
+                    cena, waluta = normalize_price(price_match.group(0))
+
+                area = None
+                area_match = re.search(
+                    r"(\d[\d\s,]*[,.]?\d*)\s*m[2\u00b2]", card_text
+                )
+                if area_match:
+                    area = normalize_area(area_match.group(1))
+
+                rooms = None
+                rooms_match = re.search(
+                    r"(\d+)\s*poko[ji]", card_text, re.IGNORECASE
+                )
+                if rooms_match:
+                    rooms = int(rooms_match.group(1))
+
+                location_text = ""
+                loc_els = parent.find_elements(
+                    By.CSS_SELECTOR,
+                    "[class*='location'], [class*='address'], "
+                    "[class*='miasto'], [class*='city']"
+                )
+                if loc_els:
+                    location_text = loc_els[0].text.strip()
+
+                miasto, dzielnica = "", ""
+                if location_text:
+                    loc_parts = [p.strip() for p in location_text.split(",")]
+                    if len(loc_parts) >= 2:
+                        miasto = loc_parts[0]
+                        dzielnica = loc_parts[1]
+                    elif loc_parts:
+                        miasto = loc_parts[0]
+
+                if clean_url.startswith("/"):
+                    clean_url = "https://gratka.pl" + clean_url
+
+                listings.append({
+                    "url": clean_url,
+                    "tytul": title,
+                    "cena": cena,
+                    "waluta": waluta,
+                    "powierzchnia_m2": area,
+                    "liczba_pokoi": rooms,
+                    "miasto": miasto,
+                    "dzielnica": dzielnica,
+                })
+            except Exception:
+                continue
         return listings
 
     def _parse_card(self, card) -> dict:
         # URL
         url = ""
-        links = card.find_elements(By.CSS_SELECTOR, "a[href*='gratka.pl']")
+        links = card.find_elements(
+            By.CSS_SELECTOR,
+            "a[href*='gratka.pl/nieruchomosci/'], "
+            "a[href*='/nieruchomosci/']"
+        )
         if not links:
             links = card.find_elements(By.TAG_NAME, "a")
-        if links:
+        for lnk in links:
+            href = lnk.get_attribute("href") or ""
+            if href.startswith("/"):
+                href = "https://gratka.pl" + href
+            # Filtruj: link do konkretnego ogloszenia (z ID numerycznym)
+            if re.search(r'/nieruchomosci/\w+/[\w-]+-\d{4,}', href):
+                url = href.split("?")[0].split("#")[0]
+                break
+        # Jesli nie znaleziono linka z ID, bierz pierwszy z /nieruchomosci/
+        if not url and links:
             href = links[0].get_attribute("href") or ""
             if href.startswith("/"):
                 href = "https://gratka.pl" + href
-            url = href
+            if "/nieruchomosci/" in href:
+                url = href.split("?")[0].split("#")[0]
 
         # Tytul
         title = ""
-        for sel in ["h2", "h3", "[class*='title']", "a"]:
+        for sel in ["h2", "h3", "h4", "[class*='title']", "a"]:
             els = card.find_elements(By.CSS_SELECTOR, sel)
             if els and els[0].text.strip():
                 title = els[0].text.strip()
                 break
 
-        # Cena
+        # Cena - szukaj tez wzorca w tekscie
         cena, waluta = None, "PLN"
         for sel in ["[class*='price']", "span.teaserUnified__price",
                      "p[class*='price']", "strong"]:
@@ -1193,6 +1321,14 @@ class GratkaScraper(PortalScraper):
                 cena, waluta = normalize_price(els[0].text)
                 if cena:
                     break
+        if not cena:
+            card_text = card.text or ""
+            price_match = re.search(
+                r'(\d[\d\s]*[\d])\s*(?:z[lł]|PLN|EUR|USD)',
+                card_text, re.IGNORECASE
+            )
+            if price_match:
+                cena, waluta = normalize_price(price_match.group(0))
 
         # Powierzchnia, pokoje
         card_text = card.text or ""
@@ -1207,7 +1343,9 @@ class GratkaScraper(PortalScraper):
 
         # Lokalizacja
         location_text = ""
-        for sel in ["[class*='location']", "span[class*='address']", "p.teaserUnified__location"]:
+        for sel in ["[class*='location']", "[class*='address']",
+                     "span[class*='address']", "p.teaserUnified__location",
+                     "[class*='city']", "[class*='miejsce']"]:
             els = card.find_elements(By.CSS_SELECTOR, sel)
             if els:
                 location_text = els[0].text.strip()
@@ -1240,7 +1378,9 @@ class GratkaScraper(PortalScraper):
                 "a[class*='pagination__nextPage'], "
                 "a[aria-label='next'], "
                 "li.pagination-next a, "
-                "a.pagination__next"
+                "a.pagination__next, "
+                "a.strona[href], "
+                "a[class*='next']"
             )
             for btn in next_btns:
                 if btn.is_displayed():
@@ -1681,12 +1821,15 @@ class LentoScraper(PortalScraper):
 
         self._ensure_no_overlay()
 
+        # Strategia 1: szukaj kart ogloszen
         cards = self.driver.find_elements(
             By.CSS_SELECTOR,
             "div.main-list > div[class*='item'], "
             "div[class*='offer'], "
             "article, "
-            "div.ad-list-item"
+            "div.ad-list-item, "
+            "div[class*='listing'] > div, "
+            "ul[class*='list'] > li"
         )
         if not cards:
             cards = self.driver.find_elements(
@@ -1698,6 +1841,111 @@ class LentoScraper(PortalScraper):
                 listing = self._parse_card(card)
                 if listing and listing.get("url"):
                     listings.append(listing)
+            except Exception:
+                continue
+
+        # Fallback: link-based extraction
+        if not listings:
+            listings = self._extract_by_links()
+
+        return listings
+
+    def _extract_by_links(self) -> list[dict]:
+        """Fallback: ekstrakcja ogloszen przez wyszukanie linkow do ofert."""
+        listings: list[dict] = []
+        # Lento URL pattern: subdomena.lento.pl/ogloszenie-tytul-iNNNNNN.html
+        # lub lento.pl/...
+        all_links = self.driver.find_elements(By.TAG_NAME, "a")
+
+        seen: set[str] = set()
+        for link in all_links:
+            try:
+                href = link.get_attribute("href") or ""
+                if not href:
+                    continue
+                # Szukaj linkow do ogloszen na lento.pl
+                # Pattern: -iNNNNNN.html lub /ogloszenie/ itp.
+                is_ad = (
+                    re.search(r'lento\.pl/.*-i\d{4,}\.html', href)
+                    or re.search(r'lento\.pl/.*-s\d{4,}', href)
+                    or re.search(r'lento\.pl/[^/]+/[^/]+-\d{5,}', href)
+                )
+                if not is_ad:
+                    continue
+                # Odfiltruj strony kategorii/paginacji
+                if '/q-' in href and href.endswith('/'):
+                    continue
+                clean_url = href.split("?")[0].split("#")[0]
+                if clean_url in seen:
+                    continue
+                seen.add(clean_url)
+
+                # Wyciagnij dane z kontekstu
+                parent = link
+                for _ in range(5):
+                    try:
+                        parent = parent.find_element(By.XPATH, "..")
+                        parent_text = parent.text or ""
+                        if len(parent_text) > 30:
+                            break
+                    except Exception:
+                        break
+
+                card_text = parent.text or link.text or ""
+                title = link.text.strip() if link.text else ""
+                if not title:
+                    title_els = parent.find_elements(
+                        By.CSS_SELECTOR, "h2, h3, h4, [class*='title']"
+                    )
+                    if title_els:
+                        title = title_els[0].text.strip()
+
+                cena, waluta = None, "PLN"
+                price_match = re.search(
+                    r'(\d[\d\s]*[\d])\s*(?:z[lł]|PLN|EUR|USD)',
+                    card_text, re.IGNORECASE
+                )
+                if price_match:
+                    cena, waluta = normalize_price(price_match.group(0))
+
+                area = None
+                area_match = re.search(
+                    r"(\d[\d\s,]*[,.]?\d*)\s*m[2\u00b2]", card_text
+                )
+                if area_match:
+                    area = normalize_area(area_match.group(1))
+
+                rooms = None
+                rooms_match = re.search(
+                    r"(\d+)\s*poko[ji]", card_text, re.IGNORECASE
+                )
+                if rooms_match:
+                    rooms = int(rooms_match.group(1))
+
+                location_text = ""
+                loc_els = parent.find_elements(
+                    By.CSS_SELECTOR,
+                    "[class*='location'], [class*='address'], "
+                    "[class*='city'], [class*='miejsce']"
+                )
+                if loc_els:
+                    location_text = loc_els[0].text.strip()
+
+                miasto = ""
+                if location_text:
+                    loc_parts = [p.strip() for p in location_text.split(",")]
+                    if loc_parts:
+                        miasto = loc_parts[0]
+
+                listings.append({
+                    "url": clean_url,
+                    "tytul": title,
+                    "cena": cena,
+                    "waluta": waluta,
+                    "powierzchnia_m2": area,
+                    "liczba_pokoi": rooms,
+                    "miasto": miasto,
+                })
             except Exception:
                 continue
         return listings
@@ -1769,10 +2017,13 @@ class LentoScraper(PortalScraper):
 
     def _go_to_next_page(self) -> bool:
         try:
+            # Lento paginacja - rozne warianty
             next_btns = self.driver.find_elements(
                 By.CSS_SELECTOR,
                 "a[rel='next'], a.next, "
-                "li.next a, a[class*='next']"
+                "li.next a, a[class*='next'], "
+                "a[class*='pagination'] + a, "
+                "nav[class*='pag'] a"
             )
             for btn in next_btns:
                 if btn.is_displayed():
@@ -1784,6 +2035,15 @@ class LentoScraper(PortalScraper):
                     safe_click(self.driver, btn)
                     time.sleep(3)
                     return True
+            # Fallback: URL-based pagination
+            current = self.driver.current_url
+            page_match = re.search(r'[?&]page=(\d+)', current)
+            if page_match:
+                next_page = int(page_match.group(1)) + 1
+                next_url = re.sub(r'([?&])page=\d+', f'\\1page={next_page}', current)
+                self.driver.get(next_url)
+                time.sleep(3)
+                return True
         except Exception:
             pass
         return False
