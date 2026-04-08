@@ -86,51 +86,142 @@ def safe_click(driver, element) -> None:
 def dismiss_cookie_consent(driver, portal: str = "") -> bool:
     """Probuje zamknac baner cookies. Zwraca True jesli udalo sie kliknac.
 
-    Uzywa selektorow specyficznych dla portalu + generycznych.
-    Jesli nie znajdzie przycisku, probuje JS-owe podejscie do usuwania overlay.
+    Strategia wielopoziomowa:
+    1. JS API portalu (Didomi.setUserAgreeToAll, googlefc, OneTrust, CookieBot)
+    2. Klikniecie przycisku w iframe consent (FundingChoices)
+    3. Klikniecie przycisku w glownym DOM / Shadow DOM
+    4. Wyszukanie po polskim tekscie przycisku
+    5. Usuniecie overlay JS-em (ostatecznosc)
     """
-    # Selektory specyficzne dla portali
+
+    # ---- 1. JS API consent (najniezawodniejsze) ----
+    js_api_accepted = driver.execute_script("""
+        // Didomi (gratka.pl)
+        if (window.Didomi) {
+            try {
+                Didomi.setUserAgreeToAll();
+                return 'didomi';
+            } catch(e) {}
+        }
+        // Didomi callback (jesli SDK jeszcze sie laduje)
+        if (window.didomiOnReady) {
+            try {
+                window.didomiOnReady.push(function(Didomi) {
+                    Didomi.setUserAgreeToAll();
+                });
+                return 'didomi-queued';
+            } catch(e) {}
+        }
+        // OneTrust (otodom, olx)
+        if (window.OneTrust) {
+            try {
+                OneTrust.AllowAll();
+                OneTrust.Close();
+                return 'onetrust';
+            } catch(e) {}
+        }
+        // CookieBot
+        if (window.Cookiebot) {
+            try {
+                Cookiebot.submitCustomConsent(true, true, true);
+                return 'cookiebot';
+            } catch(e) {}
+        }
+        // Google Funding Choices / CMP (lento, nieruchomosci-online)
+        if (window.googlefc) {
+            try {
+                // Nie ma bezposredniego "accept all" w googlefc API,
+                // wiec probujemy __tcfapi (IAB TCF)
+                if (window.__tcfapi) {
+                    __tcfapi('addEventListener', 2, function(){});
+                }
+            } catch(e) {}
+        }
+        // IAB TCF - ustawienie consent przez API
+        if (window.__tcfapi) {
+            try {
+                // Nie mozna programistycznie zaakceptowac przez TCF API
+                // ale mozna sprawdzic czy CMP jest aktywny
+            } catch(e) {}
+        }
+        return null;
+    """)
+    if js_api_accepted:
+        time.sleep(1.5)
+        return True
+
+    # ---- 2. Klikniecie w iframe consent (FundingChoices / Google CMP) ----
+    # FundingChoices renderuje dialog w iframe
+    try:
+        iframe_selectors = [
+            "iframe[id*='fc-iframe']",
+            "iframe[src*='fundingchoices']",
+            "iframe[src*='googleusercontent.com/consent']",
+            "iframe[id*='consent']",
+            "iframe[src*='consent']",
+            "iframe[title*='consent' i]",
+            "iframe[title*='cookie' i]",
+        ]
+        for iframe_sel in iframe_selectors:
+            iframes = driver.find_elements(By.CSS_SELECTOR, iframe_sel)
+            for iframe in iframes:
+                try:
+                    if not iframe.is_displayed():
+                        continue
+                    driver.switch_to.frame(iframe)
+                    btn_selectors = [
+                        "button.fc-cta-consent",
+                        "button.fc-button-background",
+                        "button[class*='consent']",
+                        "button[class*='accept']",
+                        "button[class*='agree']",
+                        "button[aria-label*='consent' i]",
+                        "button[aria-label*='Agree' i]",
+                        "button[aria-label*='Accept' i]",
+                        "p.fc-button-label",
+                    ]
+                    for btn_sel in btn_selectors:
+                        btns = driver.find_elements(By.CSS_SELECTOR, btn_sel)
+                        for btn in btns:
+                            if btn.is_displayed():
+                                try:
+                                    btn.click()
+                                except Exception:
+                                    driver.execute_script(
+                                        "arguments[0].click();", btn)
+                                driver.switch_to.default_content()
+                                time.sleep(1.5)
+                                return True
+                    driver.switch_to.default_content()
+                except Exception:
+                    driver.switch_to.default_content()
+    except Exception:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+    # ---- 3. Klikniecie przycisku w glownym DOM ----
     portal_selectors: dict[str, list[str]] = {
         "gratka": [
             "#didomi-notice-agree-button",
             "button[aria-label='Zaakceptuj i zamknij']",
             "button.didomi-components-button--color",
-            "#didomi-popup .didomi-button",
-            "button.sc-dcJsrY",  # gratka styled-components
-            "span.didomi-continue-without-agreeing",
         ],
         "lento": [
             "button.fc-cta-consent",
-            "button.fc-button-background",
-            ".fc-consent-root button[aria-label*='consent' i]",
-            ".fc-consent-root .fc-cta-consent",
-            "button[title='Akceptuję' i]",
-            "a.fc-cta-consent",
             "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
-            "button[id*='rodo' i]",
-            "button[class*='rodo' i]",
             "div.cc-window button.cc-btn",
-            "div.cc-window a.cc-btn",
         ],
         "nieruchomosci": [
             "button.fc-cta-consent",
-            "button.fc-button-background",
-            ".fc-consent-root .fc-cta-consent",
-            "button[title='Akceptuję' i]",
             "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
             "button.cmp-button_button",
-            "button[class*='cmp' i]",
-            "#cookieConsentAcceptButton",
-            "button[class*='cookie-accept']",
-            "div.cc-window button.cc-btn",
         ],
     }
-
-    # Generyczne selektory (fallback)
     generic_selectors = [
         "button#onetrust-accept-btn-handler",
         "button[data-testid='accept-all']",
-        "button.cmp-button_button",
         "#didomi-notice-agree-button",
         "button.fc-cta-consent",
         "button[id*='cookie' i]",
@@ -141,12 +232,8 @@ def dismiss_cookie_consent(driver, portal: str = "") -> bool:
         ".cookie-close",
         "[data-action='accept-cookies']",
         "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
-        "button[class*='cookie-accept']",
     ]
-
-    # Najpierw selektory specyficzne dla portalu
     selectors = portal_selectors.get(portal, []) + generic_selectors
-
     for sel in selectors:
         try:
             btn = driver.find_element(By.CSS_SELECTOR, sel)
@@ -160,22 +247,53 @@ def dismiss_cookie_consent(driver, portal: str = "") -> bool:
         except Exception:
             continue
 
-    # Fallback: wyszukaj przycisk po tekscie (polskie portale)
+    # ---- 3b. Didomi w Shadow DOM (gratka) ----
+    try:
+        accepted = driver.execute_script("""
+            var host = document.getElementById('didomi-host');
+            if (!host || !host.shadowRoot) return false;
+            var root = host.shadowRoot;
+            // Szukaj przycisku agree w shadow root
+            var btn = root.querySelector('#didomi-notice-agree-button')
+                   || root.querySelector('[class*="agree"]')
+                   || root.querySelector('button[aria-label*="agree" i]')
+                   || root.querySelector('button[aria-label*="Zaakceptuj" i]');
+            if (btn) { btn.click(); return true; }
+            // Szukaj we wszystkich komponentach shadow
+            var buttons = root.querySelectorAll('button');
+            for (var i = 0; i < buttons.length; i++) {
+                var text = buttons[i].textContent.toLowerCase();
+                if (text.indexOf('akceptuj') !== -1
+                    || text.indexOf('agree') !== -1
+                    || text.indexOf('zgadzam') !== -1
+                    || text.indexOf('accept') !== -1) {
+                    buttons[i].click();
+                    return true;
+                }
+            }
+            return false;
+        """)
+        if accepted:
+            time.sleep(1.5)
+            return True
+    except Exception:
+        pass
+
+    # ---- 4. Wyszukanie po polskim tekscie ----
     accept_texts = [
-        "Akceptuję", "Akceptuj", "Zgadzam się", "Zgadzam sie",
-        "Wyrażam zgodę", "Wyrazam zgode", "Przejdź do serwisu",
-        "Przejdz do serwisu", "OK", "Rozumiem",
-        "Zaakceptuj", "Akceptuj wszystko", "Accept all",
-        "Kontynuuj", "Przejdź dalej",
+        "akceptuję", "akceptuj", "zgadzam się", "zgadzam sie",
+        "wyrażam zgodę", "wyrazam zgode", "przejdź do serwisu",
+        "przejdz do serwisu", "rozumiem", "zaakceptuj",
+        "akceptuj wszystko", "accept all",
     ]
     for text in accept_texts:
         try:
             btns = driver.find_elements(
                 By.XPATH,
-                f"//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                f"'abcdefghijklmnopqrstuvwxyz'), '{text.lower()}')] | "
-                f"//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                f"'abcdefghijklmnopqrstuvwxyz'), '{text.lower()}')]"
+                f"//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZĘÓĄŚŁŻŹĆŃ',"
+                f"'abcdefghijklmnopqrstuvwxyzęóąśłżźćń'), '{text}')] | "
+                f"//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZĘÓĄŚŁŻŹĆŃ',"
+                f"'abcdefghijklmnopqrstuvwxyzęóąśłżźćń'), '{text}')]"
             )
             for btn in btns:
                 if btn.is_displayed():
@@ -188,35 +306,35 @@ def dismiss_cookie_consent(driver, portal: str = "") -> bool:
         except Exception:
             continue
 
-    # Ostateczny fallback: usun overlay i iframe cookie z DOM
+    # ---- 5. Ostatecznosc: usun overlay z DOM ----
     try:
         driver.execute_script("""
-            // Usun popularne cookie overlay
-            var selectors = [
-                '#didomi-host', '.fc-consent-root', '#CybotCookiebotDialog',
-                '#onetrust-consent-sdk', '.cc-window', '#cookie-law-info-bar',
+            var sels = [
+                '#didomi-host', '.didomi-popup-container', '.didomi-popup-backdrop',
+                '.fc-consent-root', '.fc-dialog-overlay', '.fc-dialog-container',
+                '#CybotCookiebotDialog', '#onetrust-consent-sdk', '.cc-window',
+                '#cookie-law-info-bar',
                 '[class*="cookie-overlay"]', '[class*="consent-overlay"]',
                 '[id*="cookie-banner"]', '[class*="cookie-banner"]',
                 '[class*="gdpr"]', '[class*="rodo"]'
             ];
-            selectors.forEach(function(s) {
+            sels.forEach(function(s) {
                 document.querySelectorAll(s).forEach(function(el) { el.remove(); });
             });
-            // Usun backdrop/overlay blokujacy klikniecia
-            document.querySelectorAll('[class*="overlay"]').forEach(function(el) {
+            // Usun fixed/absolute overlay o wysokim z-index
+            document.querySelectorAll('div, aside, section').forEach(function(el) {
                 var style = window.getComputedStyle(el);
-                if (style.position === 'fixed' || style.position === 'absolute') {
-                    if (parseFloat(style.zIndex) > 100 || style.zIndex === 'auto') {
-                        el.remove();
-                    }
+                if ((style.position === 'fixed' || style.position === 'sticky')
+                    && parseFloat(style.zIndex) > 999) {
+                    el.remove();
                 }
             });
-            // Przywroc scroll na body
             document.body.style.overflow = 'auto';
             document.documentElement.style.overflow = 'auto';
+            document.body.style.pointerEvents = 'auto';
         """)
         time.sleep(0.5)
-        return True  # overlay usuniete JS-em
+        return True
     except Exception:
         pass
 
@@ -975,41 +1093,49 @@ class GratkaScraper(PortalScraper):
         return "inne"
 
     def _ensure_no_overlay(self) -> None:
-        """Upewnia sie ze cookie overlay nie blokuje strony Gratka."""
-        # Gratka uzywa Didomi - sprawdz czy iframe z consent nadal istnieje
-        try:
-            iframes = self.driver.find_elements(By.CSS_SELECTOR,
-                "iframe[id*='didomi'], iframe[src*='didomi'], "
-                "iframe[id*='consent'], iframe[src*='consent']")
-            for iframe in iframes:
-                if iframe.is_displayed():
-                    # Przelacz sie do iframe i kliknij accept
-                    self.driver.switch_to.frame(iframe)
-                    try:
-                        btns = self.driver.find_elements(By.CSS_SELECTOR,
-                            "button[class*='agree'], button[class*='accept'], "
-                            "button#didomi-notice-agree-button")
-                        for btn in btns:
-                            if btn.is_displayed():
-                                btn.click()
-                                time.sleep(1)
-                                break
-                    finally:
-                        self.driver.switch_to.default_content()
-        except Exception:
-            pass
+        """Upewnia sie ze cookie overlay nie blokuje strony Gratka.
 
-        # Usun overlay JS-em na wszelki wypadek
+        Gratka uzywa Didomi CMP. Baner Didomi renderuje sie wewnatrz
+        Shadow DOM (#didomi-host -> shadowRoot). Standardowe selektory
+        Selenium nie trafiaja do Shadow DOM, wiec uzywamy JS API.
+        """
         try:
-            self.driver.execute_script("""
+            accepted = self.driver.execute_script("""
+                // 1. Didomi JS API (najlepsze)
+                if (window.Didomi) {
+                    try { Didomi.setUserAgreeToAll(); return true; }
+                    catch(e) {}
+                }
+                // 2. Didomi callback jesli SDK jeszcze sie laduje
+                if (window.didomiOnReady) {
+                    window.didomiOnReady.push(function(Didomi) {
+                        Didomi.setUserAgreeToAll();
+                    });
+                    return true;
+                }
+                // 3. Shadow DOM - kliknij przycisk wewnatrz #didomi-host
+                var host = document.getElementById('didomi-host');
+                if (host && host.shadowRoot) {
+                    var root = host.shadowRoot;
+                    var btn = root.querySelector('#didomi-notice-agree-button')
+                           || root.querySelector('[class*="agree"]')
+                           || root.querySelector('button');
+                    if (btn) { btn.click(); return true; }
+                }
+                // 4. Usun Didomi overlay z DOM
                 document.querySelectorAll(
                     '#didomi-host, .didomi-popup-container, '
-                    + '[class*="consent-overlay"], [class*="cookie-overlay"], '
-                    + '.didomi-popup-backdrop'
+                    + '.didomi-popup-backdrop, .didomi-popup-overlay, '
+                    + '[class*="didomi"]'
                 ).forEach(function(el) { el.remove(); });
                 document.body.style.overflow = 'auto';
                 document.documentElement.style.overflow = 'auto';
+                document.body.style.pointerEvents = 'auto';
+                document.body.classList.remove('didomi-popup-open');
+                return false;
             """)
+            if accepted:
+                time.sleep(1.5)
         except Exception:
             pass
 
@@ -1154,40 +1280,125 @@ class NieruchomosciOnlineScraper(PortalScraper):
         return "inne"
 
     def _ensure_no_overlay(self) -> None:
-        """Upewnia sie ze cookie overlay nie blokuje strony nieruchomosci-online."""
-        # Sprawdz iframe consent (FundingChoices / CMP)
+        """Upewnia sie ze cookie overlay nie blokuje strony nieruchomosci-online.
+
+        Portal moze uzywac FundingChoices (iframe) lub inny CMP.
+        Podejscie: przeszukaj wszystkie iframe na stronie.
+        """
+        # 1. JS API
         try:
-            iframes = self.driver.find_elements(By.CSS_SELECTOR,
-                "iframe[id*='fc-iframe'], iframe[src*='fundingchoices'], "
-                "iframe[id*='consent'], iframe[src*='consent']")
-            for iframe in iframes:
-                if iframe.is_displayed():
-                    self.driver.switch_to.frame(iframe)
-                    try:
-                        btns = self.driver.find_elements(By.CSS_SELECTOR,
-                            "button.fc-cta-consent, button[class*='accept'], "
-                            "button[class*='agree']")
-                        for btn in btns:
-                            if btn.is_displayed():
-                                btn.click()
-                                time.sleep(1)
-                                break
-                    finally:
-                        self.driver.switch_to.default_content()
+            accepted = self.driver.execute_script("""
+                if (window.Cookiebot) {
+                    try { Cookiebot.submitCustomConsent(true,true,true); return true; }
+                    catch(e) {}
+                }
+                return false;
+            """)
+            if accepted:
+                time.sleep(1.5)
+                return
         except Exception:
             pass
 
-        # Usun overlay JS-em
+        # 2. Przeszukaj iframe (FundingChoices)
+        try:
+            all_iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+            for iframe in all_iframes:
+                try:
+                    src = iframe.get_attribute("src") or ""
+                    iframe_id = iframe.get_attribute("id") or ""
+                    title = iframe.get_attribute("title") or ""
+                    combined = (src + iframe_id + title).lower()
+                    is_consent = any(kw in combined for kw in [
+                        "consent", "fc-", "fundingchoice", "cookie", "cmp",
+                        "privacy"])
+                    if not is_consent or not iframe.is_displayed():
+                        continue
+                    self.driver.switch_to.frame(iframe)
+                    btn_sels = [
+                        "button.fc-cta-consent",
+                        "button.fc-button-background",
+                        "button[class*='consent']",
+                        "button[class*='accept']",
+                        "button[class*='agree']",
+                    ]
+                    clicked = False
+                    for btn_sel in btn_sels:
+                        btns = self.driver.find_elements(By.CSS_SELECTOR, btn_sel)
+                        for btn in btns:
+                            if btn.is_displayed():
+                                try:
+                                    btn.click()
+                                except Exception:
+                                    self.driver.execute_script(
+                                        "arguments[0].click();", btn)
+                                clicked = True
+                                break
+                        if clicked:
+                            break
+                    if not clicked:
+                        all_btns = self.driver.find_elements(By.TAG_NAME, "button")
+                        for btn in all_btns:
+                            txt = (btn.text or "").lower()
+                            if any(kw in txt for kw in [
+                                "consent", "accept", "agree", "akceptuj",
+                                "zgadzam", "rozumiem"
+                            ]):
+                                try:
+                                    btn.click()
+                                except Exception:
+                                    self.driver.execute_script(
+                                        "arguments[0].click();", btn)
+                                clicked = True
+                                break
+                    self.driver.switch_to.default_content()
+                    if clicked:
+                        time.sleep(1.5)
+                        return
+                except Exception:
+                    try:
+                        self.driver.switch_to.default_content()
+                    except Exception:
+                        pass
+        except Exception:
+            try:
+                self.driver.switch_to.default_content()
+            except Exception:
+                pass
+
+        # 3. Przyciski w glownym DOM
+        for sel in ["button.fc-cta-consent",
+                     "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+                     "button[class*='accept' i]", "button[class*='consent' i]"]:
+            try:
+                btn = self.driver.find_element(By.CSS_SELECTOR, sel)
+                if btn.is_displayed():
+                    try:
+                        btn.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(1.0)
+                    return
+            except Exception:
+                continue
+
+        # 4. Usun overlay JS-em
         try:
             self.driver.execute_script("""
                 document.querySelectorAll(
-                    '.fc-consent-root, .fc-dialog-overlay, '
-                    + '#CybotCookiebotDialog, [class*="consent-overlay"], '
-                    + '[class*="cookie-overlay"], .cc-window, '
+                    '.fc-consent-root, .fc-dialog-overlay, .fc-dialog-container, '
+                    + '#CybotCookiebotDialog, .cc-window, '
+                    + '[class*="consent-overlay"], [class*="cookie-overlay"], '
                     + '[class*="cookie-banner"]'
                 ).forEach(function(el) { el.remove(); });
+                document.querySelectorAll('div, aside').forEach(function(el) {
+                    var s = window.getComputedStyle(el);
+                    if ((s.position==='fixed'||s.position==='sticky')
+                        && parseFloat(s.zIndex) > 999) el.remove();
+                });
                 document.body.style.overflow = 'auto';
                 document.documentElement.style.overflow = 'auto';
+                document.body.style.pointerEvents = 'auto';
             """)
         except Exception:
             pass
@@ -1327,40 +1538,140 @@ class LentoScraper(PortalScraper):
         return "inne"
 
     def _ensure_no_overlay(self) -> None:
-        """Upewnia sie ze cookie overlay nie blokuje strony Lento."""
-        # Lento uzywa FundingChoices (fc-*) lub CookieBot
+        """Upewnia sie ze cookie overlay nie blokuje strony Lento.
+
+        Lento moze uzywac FundingChoices (Google CMP) lub innego CMP.
+        FundingChoices renderuje dialog w iframe. Probujemy:
+        1. JS API (CookieBot, __tcfapi)
+        2. Klikniecie w iframe FundingChoices
+        3. Klikniecie w glownym DOM
+        4. Usuniecie overlay JS-em
+        """
+        # 1. JS API
         try:
-            iframes = self.driver.find_elements(By.CSS_SELECTOR,
-                "iframe[id*='fc-iframe'], iframe[src*='fundingchoices'], "
-                "iframe[id*='consent']")
-            for iframe in iframes:
-                if iframe.is_displayed():
-                    self.driver.switch_to.frame(iframe)
-                    try:
-                        btns = self.driver.find_elements(By.CSS_SELECTOR,
-                            "button.fc-cta-consent, button.fc-button-background, "
-                            "button[class*='accept'], button[class*='agree']")
-                        for btn in btns:
-                            if btn.is_displayed():
-                                btn.click()
-                                time.sleep(1)
-                                break
-                    finally:
-                        self.driver.switch_to.default_content()
+            accepted = self.driver.execute_script("""
+                if (window.Cookiebot) {
+                    try { Cookiebot.submitCustomConsent(true,true,true); return true; }
+                    catch(e) {}
+                }
+                if (window.__tcfapi) {
+                    // Nie mozna programistycznie zaakceptowac przez TCF
+                }
+                return false;
+            """)
+            if accepted:
+                time.sleep(1.5)
+                return
         except Exception:
             pass
 
-        # Usun overlay JS-em
+        # 2. Iframe FundingChoices - szukamy wszystkich iframe i probujemy
+        try:
+            all_iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+            for iframe in all_iframes:
+                try:
+                    src = iframe.get_attribute("src") or ""
+                    iframe_id = iframe.get_attribute("id") or ""
+                    title = iframe.get_attribute("title") or ""
+                    # Identyfikuj iframe consent
+                    is_consent = any(kw in (src + iframe_id + title).lower()
+                                     for kw in ["consent", "fc-", "fundingchoice",
+                                                 "cookie", "cmp", "privacy"])
+                    if not is_consent or not iframe.is_displayed():
+                        continue
+                    self.driver.switch_to.frame(iframe)
+                    btn_sels = [
+                        "button.fc-cta-consent",
+                        "button.fc-button-background",
+                        "button[class*='consent']",
+                        "button[class*='accept']",
+                        "button[class*='agree']",
+                    ]
+                    clicked = False
+                    for btn_sel in btn_sels:
+                        btns = self.driver.find_elements(By.CSS_SELECTOR, btn_sel)
+                        for btn in btns:
+                            if btn.is_displayed():
+                                try:
+                                    btn.click()
+                                except Exception:
+                                    self.driver.execute_script(
+                                        "arguments[0].click();", btn)
+                                clicked = True
+                                break
+                        if clicked:
+                            break
+                    # Fallback: szukaj po tekscie w iframe
+                    if not clicked:
+                        all_btns = self.driver.find_elements(By.TAG_NAME, "button")
+                        for btn in all_btns:
+                            txt = (btn.text or "").lower()
+                            if any(kw in txt for kw in [
+                                "consent", "accept", "agree", "akceptuj",
+                                "zgadzam", "rozumiem"
+                            ]):
+                                try:
+                                    btn.click()
+                                except Exception:
+                                    self.driver.execute_script(
+                                        "arguments[0].click();", btn)
+                                clicked = True
+                                break
+                    self.driver.switch_to.default_content()
+                    if clicked:
+                        time.sleep(1.5)
+                        return
+                except Exception:
+                    try:
+                        self.driver.switch_to.default_content()
+                    except Exception:
+                        pass
+        except Exception:
+            try:
+                self.driver.switch_to.default_content()
+            except Exception:
+                pass
+
+        # 3. Przyciski w glownym DOM
+        dom_selectors = [
+            "button.fc-cta-consent",
+            "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+            "div.cc-window button.cc-btn",
+            "div.cc-window a.cc-btn",
+            "button[class*='accept' i]",
+            "button[class*='consent' i]",
+        ]
+        for sel in dom_selectors:
+            try:
+                btn = self.driver.find_element(By.CSS_SELECTOR, sel)
+                if btn.is_displayed():
+                    try:
+                        btn.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(1.0)
+                    return
+            except Exception:
+                continue
+
+        # 4. Usun overlay JS-em
         try:
             self.driver.execute_script("""
                 document.querySelectorAll(
-                    '.fc-consent-root, .fc-dialog-overlay, '
+                    '.fc-consent-root, .fc-dialog-overlay, .fc-dialog-container, '
                     + '#CybotCookiebotDialog, .cc-window, '
                     + '[class*="consent-overlay"], [class*="cookie-overlay"], '
                     + '[class*="cookie-banner"], [class*="rodo"]'
                 ).forEach(function(el) { el.remove(); });
+                // Usun fixed overlay z wysokim z-index
+                document.querySelectorAll('div, aside').forEach(function(el) {
+                    var s = window.getComputedStyle(el);
+                    if ((s.position==='fixed'||s.position==='sticky')
+                        && parseFloat(s.zIndex) > 999) el.remove();
+                });
                 document.body.style.overflow = 'auto';
                 document.documentElement.style.overflow = 'auto';
+                document.body.style.pointerEvents = 'auto';
             """)
         except Exception:
             pass
